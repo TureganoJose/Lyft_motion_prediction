@@ -1,4 +1,5 @@
 import bisect
+import warnings
 from functools import partial
 from typing import Optional, Tuple, cast
 from pathlib import Path
@@ -14,7 +15,7 @@ from l5kit.data import (
     get_tl_faces_slice_from_frames,
 )
 from l5kit.kinematic import Perturbation
-from l5kit.rasterization import Rasterizer
+from l5kit.rasterization import Rasterizer, RenderContext
 from l5kit.sampling import generate_agent_sample
 
 from l5kit.dataset.select_agents import TH_DISTANCE_AV, TH_EXTENT_RATIO, TH_YAW_DEGREE
@@ -49,12 +50,15 @@ None if not desired
 
         self.cumulative_sizes = self.dataset.scenes["frame_index_interval"][:, 1]
 
+        render_context = RenderContext(
+            raster_size_px=np.array(cfg["raster_params"]["raster_size"]),
+            pixel_size_m=np.array(cfg["raster_params"]["pixel_size"]),
+            center_in_raster_ratio=np.array(cfg["raster_params"]["ego_center"]),
+        )		   
         # build a partial so we don't have to access cfg each time
         self.custom_sample_function = partial(
             custom_generate_agent_sample,
-            raster_size=cast(Tuple[int, int], tuple(cfg["raster_params"]["raster_size"])),
-            pixel_size=np.array(cfg["raster_params"]["pixel_size"]),
-            ego_center=np.array(cfg["raster_params"]["ego_center"]),
+			render_context=render_context,
             history_num_frames=cfg["model_params"]["history_num_frames"],
             history_step_size=cfg["model_params"]["history_step_size"],
             future_num_frames=cfg["model_params"]["future_num_frames"],
@@ -87,6 +91,17 @@ None if not desired
 
         """
         frames = self.dataset.frames[get_frames_slice_from_scenes(self.dataset.scenes[scene_index])]
+
+        tl_faces = self.dataset.tl_faces
+        try:
+            if self.cfg["raster_params"]["disable_traffic_light_faces"]:
+                tl_faces = np.empty(0, dtype=self.dataset.tl_faces.dtype)  # completely disable traffic light faces
+        except KeyError:
+            warnings.warn(
+                "disable_traffic_light_faces not found in config, this will raise an error in the future",
+                RuntimeWarning,
+                stacklevel=2,
+            )		
         data = self.custom_sample_function(state_index, frames, self.dataset.agents, self.dataset.tl_faces, track_id)
         # 0,1,C -> C,0,1
         image = data["image"].transpose(2, 0, 1)
@@ -100,10 +115,18 @@ None if not desired
         timestamp = frames[state_index]["timestamp"]
         track_id = np.int64(-1 if track_id is None else track_id)  # always a number to avoid crashing torch
 
-        speed = np.sqrt(data["velocity"][0]**2 + data["velocity"][1]**2)
-        car_states = np.array([speed, np.average(history_yaws), data["extent"][0]], dtype=np.float32)
-        n_timesteps = target_positions.shape[0]
-        target_positions = np.reshape(target_positions, (1, n_timesteps, 2))
+        # Additional car states
+        n_hist = np.sum(data["history_availabilities"])
+        dt = 0.1
+
+        speed = np.sqrt(data["velocity"][0] ** 2 + data["velocity"][1] ** 2)
+        yaw_hist_mean = np.sum(history_yaws)/n_hist
+        pos = history_positions[::-1]
+        ds = np.sqrt(np.sum(np.square(np.diff(pos, axis=0)), axis=1))
+        velocity = 3.6 * ds/dt# km/h
+        acc_avg = (velocity[-1] - velocity[0]) / (n_hist * dt)
+        car_states = np.array([speed, yaw_hist_mean, acc_avg, data["extent"][0]], dtype=np.float32)
+
 
         return {
             "image": image,
@@ -113,7 +136,11 @@ None if not desired
             "history_positions": history_positions,
             "history_yaws": history_yaws,
             "history_availabilities": data["history_availabilities"],
-            "world_to_image": data["world_to_image"],
+            "world_to_image": data["raster_from_world"],  # TODO deprecate
+            "raster_from_world": data["raster_from_world"],
+            "raster_from_agent": data["raster_from_agent"],
+            "agent_from_world": data["agent_from_world"],
+            "world_from_agent": data["world_from_agent"],										 
             "track_id": track_id,
             "timestamp": timestamp,
             "centroid": data["centroid"],
@@ -232,11 +259,17 @@ class CustomAgentDataset(CustomEgoDataset):
             agents_mask = past_mask * future_mask
 
             if min_frame_history != MIN_FRAME_HISTORY:
-                print(f"warning, you're running with custom min_frame_history of {min_frame_history}")
+                warnings.warn(
+                    f"you're running with custom min_frame_history of {min_frame_history}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             if min_frame_future != MIN_FRAME_FUTURE:
-                print(f"warning, you're running with custom min_frame_future of {min_frame_future}")
+                warnings.warn(
+                    f"you're running with custom min_frame_future of {min_frame_future}", RuntimeWarning, stacklevel=2
+                )
         else:
-            print("warning, you're running with a custom agents_mask")
+            warnings.warn("you're running with a custom agents_mask", RuntimeWarning, stacklevel=2)
 
         # store the valid agents indexes
         self.agents_indices = np.nonzero(agents_mask)[0]
@@ -245,8 +278,8 @@ class CustomAgentDataset(CustomEgoDataset):
         self.agents_mask = agents_mask
 
         # store each agent category
-        agent_label = self.dataset.agents["label_probabilities"][self.agents_indices] > 0.5
-        self.agents_category = np.nonzero(agent_label)[1]
+        #agent_label = self.dataset.agents["label_probabilities"][self.agents_indices] > 0.5
+        self.agents_category = 1#np.nonzero(agent_label)[1]
 
     def load_agents_mask(self) -> np.ndarray:
         """
@@ -258,11 +291,13 @@ class CustomAgentDataset(CustomEgoDataset):
 
         agents_mask_path = Path(self.dataset.path) / f"agents_mask/{agent_prob}"
         if not agents_mask_path.exists():  # don't check in root but check for the path
-            print(
+            warnings.warn(
                 f"cannot find the right config in {self.dataset.path},\n"
                 f"your cfg has loaded filter_agents_threshold={agent_prob};\n"
                 "but that value doesn't have a match among the agents_mask in the zarr\n"
-                "Mask will now be generated for that parameter."
+                "Mask will now be generated for that parameter.",
+                RuntimeWarning,
+                stacklevel=2,
             )
             select_agents(
                 self.dataset,
@@ -291,7 +326,7 @@ class CustomAgentDataset(CustomEgoDataset):
             if -index > len(self):
                 raise ValueError("absolute value of index should not exceed dataset length")
             index = len(self) + index
-        agent_label = self.agents_category[index]
+        agent_label = 0#self.agents_category[index]
         index = self.agents_indices[index] # bad practice here
         track_id = self.dataset.agents[index]["track_id"]
         frame_index = bisect.bisect_right(self.cumulative_sizes_agents, index)
@@ -354,11 +389,13 @@ class CustomAgentDataset(CustomEgoDataset):
         Returns:
             np.ndarray: indices that can be used for indexing with __getitem__
         """
-        frames = self.dataset.frames
-        assert frame_idx < len(frames), f"frame_idx {frame_idx} is over len {len(frames)}"
+									
+        assert frame_idx < len(self.dataset.frames), f"frame_idx {frame_idx} is over len {len(self.dataset.frames)}"
 
-        agent_slice = get_agents_slice_from_frames(frames[frame_idx])
+        # avoid accessing zarr here as we already have the information in `cumulative_sizes_agents`
+        agent_start = self.cumulative_sizes_agents[frame_idx - 1] if frame_idx > 0 else 0
+        agent_end = self.cumulative_sizes_agents[frame_idx]
 
-        mask_valid_indices = (self.agents_indices >= agent_slice.start) * (self.agents_indices < agent_slice.stop)
+        mask_valid_indices = (self.agents_indices >= agent_start) * (self.agents_indices < agent_end)
         indices = np.nonzero(mask_valid_indices)[0]
         return indices

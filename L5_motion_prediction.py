@@ -347,35 +347,35 @@ if __name__ == '__main__':
             'pixel_size': [0.5, 0.5],
             'ego_center': [0.25, 0.5],
             'map_type': 'py_semantic',
-            'satellite_map_key': 'C:/Users\jmartinez/PycharmProjects/L5_motion_prediction/input/lyft-motion-prediction-autonomous-vehicles/aerial_map/aerial_map.png',
-            'semantic_map_key': 'C:/Users\jmartinez/PycharmProjects/L5_motion_prediction/input/lyft-motion-prediction-autonomous-vehicles/semantic_map/semantic_map.pb',
-            'dataset_meta_key': 'C:/Users\jmartinez/PycharmProjects/L5_motion_prediction/input/lyft-motion-prediction-autonomous-vehicles/meta.json',
+            'satellite_map_key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/aerial_map/aerial_map.png',
+            'semantic_map_key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/semantic_map/semantic_map.pb',
+            'dataset_meta_key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/meta.json',
             'filter_agents_threshold': 0.5
         },
 
         'train_data_loader': {
-            'key': 'C:/Users\jmartinez/PycharmProjects/L5_motion_prediction/input/lyft-motion-prediction-autonomous-vehicles/scenes/train.zarr',
+            'key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/train.zarr',
             'batch_size': 12,
             'shuffle': True,
             'num_workers': 0
         },
 
         'sample_data_loader': {
-            'key': 'C:/Users\jmartinez/PycharmProjects/L5_motion_prediction/input/lyft-motion-prediction-autonomous-vehicles/scenes/sample.zarr',
+            'key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/sample.zarr',
             'batch_size': 12,
             'shuffle': False,
             'num_workers': 16
         },
 
         'valid_data_loader': {
-            'key': 'C:/Users\jmartinez/PycharmProjects/L5_motion_prediction/input/lyft-motion-prediction-autonomous-vehicles/scenes/validate.zarr',
+            'key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/validate.zarr',
             'batch_size': 32,
             'shuffle': False,
             'num_workers': 4
         },
 
         'test_data_loader': {
-            'key': 'C:/Users\jmartinez/PycharmProjects/L5_motion_prediction/input/lyft-motion-prediction-autonomous-vehicles/scenes/test.zarr',
+            'key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/test.zarr',
             'batch_size': 8,
             'shuffle': False,
             'num_workers': 4
@@ -405,9 +405,7 @@ if __name__ == '__main__':
     semantic_rasterizer = build_rasterizer(cfg, dm)
     # Load agent dataset
     if dataset_path == 'C:\\Users\\jmartinez\\PycharmProjects\\L5_motion_prediction\\input\\lyft-motion-prediction-autonomous-vehicles\\scenes\\test.zarr':
-        test_mask = np.load(
-            "C:/Users\jmartinez/PycharmProjects/L5_motion_prediction/input/lyft-motion-prediction-autonomous-vehicles/scenes/mask.npz")[
-            'arr_0']
+        test_mask = np.load("C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/mask.npz")['arr_0']
         agent_dataset = CustomAgentDataset(cfg, zarr_dataset, semantic_rasterizer, agents_mask=test_mask)
     else:
         agent_dataset = CustomAgentDataset(cfg, zarr_dataset, semantic_rasterizer)
