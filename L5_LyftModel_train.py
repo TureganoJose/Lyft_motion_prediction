@@ -11,7 +11,7 @@ import numpy as np  # linear algebra
 # For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory
 
 import os
-
+import gc
 import math
 # import packages
 from IPython.display import display, clear_output
@@ -69,7 +69,7 @@ cfg = {
     'model_params': {
         'model_architecture': 'resnet18',
         'history_num_frames': 10,
-        'lr': 1e-4,
+        'lr': 1e-3,
         'history_step_size': 1,
         'history_delta_time': 0.1,
         'future_num_frames': 50,
@@ -117,7 +117,7 @@ cfg = {
 
     'train_params': {
         'checkpoint_every_n_steps': 1000,
-        'max_num_steps': 10000
+        'max_num_steps': 5000
     },
 
     'test_params': {
@@ -163,21 +163,24 @@ if __name__ == '__main__':
     # ==== TRAIN LOOP
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = LyftMultiModel(cfg)
+
+    model.load_state_dict(torch.load("resnet18_baseline_1999.pth", map_location=device))
     # weight_path = cfg["model_params"]["weight_path"]
     # model.load_state_dict(torch.load(weight_path))
     model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=cfg["model_params"]["lr"])
     # optimizer = AdamP(model.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=1e-2)#optim.Adam(model.parameters(), lr=cfg["model_params"]["lr"])
     print(f'device {device}')
 
 
     # %% [code]
-    def train(train_dataloader, valid_dataloader, opt=None, criterion=None, lrate=1e-4):
+    def train(model, train_dataloader, valid_dataloader, opt=None, criterion=None, lrate=1e-4):
         """Function for training the model"""
         print("Building Model...")
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        model = LyftMultiModel(cfg)
-
-        model.to(device)
+        # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        # model = LyftMultiModel(cfg)
+        #
+        # model.to(device)
         optimizer = optim.Adam(model.parameters(), lr=cfg["model_params"]["lr"])
         criterion = pytorch_neg_multi_log_likelihood_batch
 
@@ -220,8 +223,9 @@ if __name__ == '__main__':
             #train_accuracy.append(acc.item())
             #train_accuracy_ave.append(np.mean(train_accuracy))
 
-            losses.append(loss.item())
-            losses_mean.append(np.mean(losses))
+            #losses.append(loss.item())
+            #losses_mean.append(np.mean(losses))
+            losses_mean=[]
 
             # Validation
             if VALIDATION:
@@ -250,20 +254,20 @@ if __name__ == '__main__':
                 torch.save({'epoch': i + 1,
                             'model_state_dict': model.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict()},
-                           f'resnet18_224x224_model_state_{i}.pth')
+                           f'resnet18_baseline_{i}.pth')
 
                 # if len(losses)>0 and loss < min(losses):
             #    print(f"Loss improved from {min(losses)} to {loss}")
-
+            gc.collect()
             progress.set_description(desc)
 
         return train_accuracy_ave, val_accuracy_ave, losses_mean, val_losses_mean, model
 
 
-    train_accuracy, val_accuracy, losses, val_losses, model = train(train_dataloader, valid_dataloader, criterion=pytorch_neg_multi_log_likelihood_batch)
+    train_accuracy, val_accuracy, losses, val_losses, model = train(model, train_dataloader, valid_dataloader, criterion=pytorch_neg_multi_log_likelihood_batch)
 
     print("losses mean {:.2f}", losses)
     # ===== SAVING MODEL
     print("Saving the model...")
-    torch.save(model.state_dict(), "resnet18_224x224.pth")
+    torch.save(model.state_dict(), "resnet18_baseline.pth")
     print('model saved')

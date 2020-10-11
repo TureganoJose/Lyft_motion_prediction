@@ -66,7 +66,7 @@ from models import LyftMultiModel, forward, LyftMultiModel_carstates
 # %% [code]
 cfg = {
     'model_params': {
-        'model_architecture': 'resnet101',
+        'model_architecture': 'resnet18',
         'local_coordinates': True,
         'history_num_frames': 10,
         'lr': 1e-4,
@@ -135,7 +135,9 @@ if __name__ == '__main__':
     model = LyftMultiModel(cfg)
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(device)
-    model.load_state_dict(torch.load("0918_predictor_full.pt", map_location=device)) #"lyft_multimode.pth"
+    checkpoint = torch.load("resnet18_baseline_1999.pth", map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    #model.load_state_dict(torch.load("resnet18_baseline_1999.pth", map_location=device)) #"lyft_multimode.pth" "0918_predictor_full.pt"
     if torch.cuda.is_available():
         model.cuda()
     model.eval()
@@ -143,7 +145,7 @@ if __name__ == '__main__':
     # ===== LOAD VALIDATION DATASET
     dm = LocalDataManager(None)
     rasterizer = build_rasterizer(cfg, dm)
-    valid_cfg = cfg["train_data_loader"]
+    valid_cfg = cfg["sample_data_loader"]
     validate_zarr = ChunkedDataset(dm.require(valid_cfg["key"])).open()
     valid_dataset = AgentDataset(cfg, validate_zarr, rasterizer)
     #valid_sub_dataset = torch.utils.data.Subset(valid_dataset, range(100))
@@ -175,7 +177,7 @@ if __name__ == '__main__':
         preds, confidences = model(inputs)#, car_states)
         future_coords_offsets_pd.append(preds.cpu().numpy().copy())
         confidences_list.append(confidences.cpu().numpy().copy())
-        pos = np.concatenate((data["history_positions"].numpy()[::-1], data["target_positions"].numpy()),axis=1)
+        pos = np.concatenate((data["history_positions"].numpy()[::-1], data["target_positions"].numpy()), axis=1)
         pos_hist = data["history_positions"].numpy()[::-1]
         pos_fut = data["target_positions"].numpy()
         #car_states = car_states.cpu().numpy()
@@ -192,16 +194,27 @@ if __name__ == '__main__':
         for agents_pred, conf_pred, agent_hist_gt, agent_fut_gt, world_from_agent, world_to_image, centroid, im,  target_availabilities in zip(agents_preds, preds_confidence, pos_hist, pos_fut, world_from_agents, world_to_image, centroids, ims, target_availabilities):
             im = valid_dataset.rasterizer.to_rgb(im)
 
-            # Ground truth from new to old coordinates
-            agent_hist_gt = transform_points(agent_hist_gt, world_from_agent) - centroid[:2]
-            agent_fut_gt = transform_points(agent_fut_gt, world_from_agent) - centroid[:2]
+            ## Ground truth from new to old coordinates
+            #agent_hist_gt = transform_points(agent_hist_gt, world_from_agent) - centroid[:2]
+            #agent_fut_gt = transform_points(agent_fut_gt, world_from_agent) - centroid[:2]
+#
+            ## Everything from old world to image coordinates
+            #agent_hist_gt_im = transform_points(agent_hist_gt + centroid[:2], world_to_image)
+            #agent_fut_gt_im = transform_points(agent_fut_gt + centroid[:2], world_to_image)
+            #agents_pred0_im = transform_points(agents_pred[0, :, :] + centroid[:2], world_to_image)
+            #agents_pred1_im = transform_points(agents_pred[1, :, :] + centroid[:2], world_to_image)
+            #agents_pred2_im = transform_points(agents_pred[2, :, :] + centroid[:2], world_to_image)
 
-            # Everything from old world to image coordinates
-            agent_hist_gt_im = transform_points(agent_hist_gt + centroid[:2], world_to_image)
-            agent_fut_gt_im = transform_points(agent_fut_gt + centroid[:2], world_to_image)
-            agents_pred0_im = transform_points(agents_pred[0, :, :] + centroid[:2], world_to_image)
-            agents_pred1_im = transform_points(agents_pred[1, :, :] + centroid[:2], world_to_image)
-            agents_pred2_im = transform_points(agents_pred[2, :, :] + centroid[:2], world_to_image)
+            # from new coordinates to image coordinates (note that the pixel_size translate from pixel to m)
+            rs = cfg["raster_params"]["raster_size"]
+            ec = cfg["raster_params"]["ego_center"]
+            ps = cfg["raster_params"]['pixel_size']
+            bias = np.array([rs[0] * ec[0], rs[1] * ec[1]])
+            agent_hist_gt_im = (1/ps[0])*agent_hist_gt + bias
+            agent_fut_gt_im = (1/ps[0])*agent_fut_gt + bias
+            agents_pred0_im = (1/ps[0])*agents_pred[0, :, :] + bias
+            agents_pred1_im = (1/ps[0])*agents_pred[1, :, :] + bias
+            agents_pred2_im = (1/ps[0])*agents_pred[2, :, :] + bias
 
             # Calculate loss
             loss = neg_multi_log_likelihood(agent_fut_gt, agents_pred, conf_pred, target_availabilities[:, 0])

@@ -20,13 +20,16 @@ import PIL
 import gc
 import zarr
 import numpy as np
+from numpy import linalg as LA
+
 #import pandas as pd
 from tqdm import tqdm
 from typing import Dict
 from collections import Counter
 from prettytable import PrettyTable
 import bisect
-from L5_classes_experiments import CustomAgentDataset, CustomEgoDataset
+#from L5_classes_experiments import CustomAgentDataset, CustomEgoDataset
+from classes.custom_classes import CustomAgentDataset, CustomEgoDataset
 import ssl
 
 
@@ -43,7 +46,6 @@ from l5kit.configs import load_config_data
 from l5kit.geometry import transform_points
 from l5kit.rasterization import build_rasterizer
 from l5kit.visualization import draw_trajectory, draw_reference_trajectory, TARGET_POINTS_COLOR
-from l5kit.evaluation import write_pred_csv, compute_metrics_csv, read_gt_csv, create_chopped_dataset, neg_multi_log_likelihood
 
 # visualization
 #import seaborn as sns
@@ -61,268 +63,6 @@ from torchvision.models.resnet import resnet18, resnet50, resnet34
 # Models
 from backbone import ResNetBackbone
 from mtp import MTP, MTPLoss
-
-
-def get_scene(agent_id):
-    frame_id = bisect.bisect_right(agents_ij[:, 0], agent_id) - 1
-    scene_id = bisect.bisect_right(frames_ij[:, 0], frame_id) - 1
-
-    scene = zarr_dataset.scenes[scene_id]
-    frame = zarr_dataset.frames[frame_id]
-    agent = zarr_dataset.agents[agent_id]
-    return scene, (frame, frame_id), agent
-
-class LabelEncoder:
-    def __init__(self, max_size=500, default_val=-1):
-        self.max_size = max_size
-        self.labels = {}
-        self.default_val = default_val
-
-    @property
-    def nlabels(self):
-        return len(self.labels)
-
-    def reset(self):
-        self.labels = {}
-
-    def partial_fit(self, keys):
-        nlabels = self.nlabels
-        available = self.max_size - nlabels
-
-        if available < 1:
-            return
-
-        keys = set(keys)
-        new_keys = list(keys - set(self.labels))
-
-        if not len(new_keys):
-            return
-
-        self.labels.update(dict(zip(new_keys, range(nlabels, nlabels + available))))
-
-    def fit(self, keys):
-        self.reset()
-        self.partial_fit(keys)
-
-    def get(self, key):
-        return self.labels.get(key, self.default_val)
-
-    def transform(self, keys):
-        return np.array(list(map(self.get, keys)))
-
-    def fit_transform(self, keys, partial=True):
-        self.partial_fit(keys) if partial else self.fit(keys)
-        return self.transform(keys)
-
-
-class CustomLyftDataset(Dataset):
-    feature_mins = np.array([-17.336, -27.137, 0., 0., 0., -3.142, -37.833, -65.583],
-                            dtype="float32")[None, None, None]
-
-    feature_maxs = np.array([17.114, 20.787, 42.854, 42.138, 7.079, 3.142, 29.802, 35.722],
-                            dtype="float32")[None, None, None]
-
-    def __init__(self, zdataset, scenes=None, nframes=10, frame_stride=15, hbackward=10,
-                 hforward=50, max_agents=150, agent_feature_dim=8):
-        """
-        Custom Lyft dataset reader.
-
-        Parmeters:
-        ----------
-        zdataset: zarr dataset
-            The root dataset, containing scenes, frames and agents
-
-        nframes: int
-            Number of frames per scene
-
-        frame_stride: int
-            The stride when reading the **nframes** frames from a scene
-
-        hbackward: int
-            Number of backward frames from  current frame
-
-        hforward: int
-            Number forward frames from current frame
-
-        max_agents: int
-            Max number of agents to read for each target frame. Note that,
-            this also include the backward agents but not the forward ones.
-        """
-        super().__init__()
-        self.zdataset = zdataset
-        self.scenes = scenes if scenes is not None else []
-        self.nframes = nframes
-        self.frame_stride = frame_stride
-        self.hbackward = hbackward
-        self.hforward = hforward
-        self.max_agents = max_agents
-
-        self.nread_frames = (nframes - 1) * frame_stride + hbackward + hforward
-
-        self.frame_fields = ['timestamp', 'agent_index_interval']
-
-        self.agent_feature_dim = agent_feature_dim
-
-        self.filter_scenes()
-
-    def __len__(self):
-        return len(self.scenes)
-
-    def filter_scenes(self):
-        self.scenes = [scene for scene in self.scenes if self.get_nframes(scene) > self.nread_frames]
-
-    def __getitem__(self, index):
-        return self.read_frames(scene=self.scenes[index])
-
-    def get_nframes(self, scene, start=None):
-        frame_start = scene["frame_index_interval"][0]
-        frame_end = scene["frame_index_interval"][1]
-        nframes = (frame_end - frame_start) if start is None else (frame_end - max(frame_start, start))
-        return nframes
-
-    def _read_frames(self, scene, start=None):
-        nframes = self.get_nframes(scene, start=start)
-        assert nframes >= self.nread_frames
-
-        frame_start = scene["frame_index_interval"][0]
-
-        start = start or frame_start + np.random.choice(nframes - self.nread_frames)
-        frames = self.zdataset.frames.get_basic_selection(
-            selection=slice(start, start + self.nread_frames),
-            fields=self.frame_fields,
-        )
-        return frames
-
-    def parse_frame(self, frame):
-        return frame
-
-    def parse_agent(self, agent):
-        return agent
-
-    def read_frames(self, scene, start=None, white_tracks=None, encoder=False):
-        white_tracks = white_tracks or []
-        frames = self._read_frames(scene=scene, start=start)
-
-        agent_start = frames[0]["agent_index_interval"][0]
-        agent_end = frames[-1]["agent_index_interval"][1]
-
-        agents = self.zdataset.agents[agent_start:agent_end]
-
-        X = np.zeros((self.nframes, self.max_agents, self.hbackward, self.agent_feature_dim), dtype=np.float32)
-        target = np.zeros((self.nframes, self.max_agents, self.hforward, 2), dtype=np.float32)
-        target_availability = np.zeros((self.nframes, self.max_agents, self.hforward), dtype=np.uint8)
-        X_availability = np.zeros((self.nframes, self.max_agents, self.hbackward), dtype=np.uint8)
-
-        for f in range(self.nframes):
-            backward_frame_start = f * self.frame_stride
-            forward_frame_start = f * self.frame_stride + self.hbackward
-            backward_frames = frames[backward_frame_start:backward_frame_start + self.hbackward]
-            forward_frames = frames[forward_frame_start:forward_frame_start + self.hforward]
-
-            backward_agent_start = backward_frames[-1]["agent_index_interval"][0] - agent_start
-            backward_agent_end = backward_frames[-1]["agent_index_interval"][1] - agent_start
-
-            backward_agents = agents[backward_agent_start:backward_agent_end]
-
-            le = LabelEncoder(max_size=self.max_agents)
-            le.fit(white_tracks)
-            le.partial_fit(backward_agents["track_id"])
-
-            for iframe, frame in enumerate(backward_frames):
-                backward_agent_start = frame["agent_index_interval"][0] - agent_start
-                backward_agent_end = frame["agent_index_interval"][1] - agent_start
-
-                backward_agents = agents[backward_agent_start:backward_agent_end]
-
-                track_ids = le.transform(backward_agents["track_id"])
-                mask = (track_ids != le.default_val)
-                mask_agents = backward_agents[mask]
-                mask_ids = track_ids[mask]
-                X[f, mask_ids, iframe, :2] = mask_agents["centroid"]
-                X[f, mask_ids, iframe, 2:5] = mask_agents["extent"]
-                X[f, mask_ids, iframe, 5] = mask_agents["yaw"]
-                X[f, mask_ids, iframe, 6:8] = mask_agents["velocity"]
-
-                X_availability[f, mask_ids, iframe] = 1
-
-            for iframe, frame in enumerate(forward_frames):
-                forward_agent_start = frame["agent_index_interval"][0] - agent_start
-                forward_agent_end = frame["agent_index_interval"][1] - agent_start
-
-                forward_agents = agents[forward_agent_start:forward_agent_end]
-
-                track_ids = le.transform(forward_agents["track_id"])
-                mask = track_ids != le.default_val
-
-                target[f, track_ids[mask], iframe] = forward_agents[mask]["centroid"]
-                target_availability[f, track_ids[mask], iframe] = 1
-
-        target -= X[:, :, [-1], :2]
-        target *= target_availability[:, :, :, None]
-        X[:, :, :, :2] -= X[:, :, [-1], :2]
-        X *= X_availability[:, :, :, None]
-        X -= self.feature_mins
-        X /= (self.feature_maxs - self.feature_mins)
-
-        if encoder:
-            return X, target, target_availability, le
-        return X, target, target_availability
-
-
-# animation for scene
-def animate_solution(images, timestamps=None):
-    def animate(i):
-        changed_artifacts = [im]
-        im.set_data(images[i])
-        if timestamps is not None:
-            time_text.set_text(timestamps[i])
-            changed_artifacts.append(im)
-        return tuple(changed_artifacts)
-
-    fig, ax = plt.subplots()
-    im = ax.imshow(images[0])
-    if timestamps is not None:
-        time_text = ax.text(0.02, 0.95, "", transform=ax.transAxes)
-
-    anim = animation.FuncAnimation(fig, animate, frames=len(images), interval=60, blit=True)
-
-    # To prevent plotting image inline.
-    plt.close()
-    return anim
-
-def visualize_rgb_image(dataset, index, title="", ax=None):
-    """Visualizes Rasterizer's RGB image"""
-    data = dataset[index]
-    im = data["image"].transpose(1, 2, 0)
-    im = dataset.rasterizer.to_rgb(im)
-
-    if ax is None:
-        fig, ax = plt.subplots()
-    if title:
-        ax.set_title(title)
-    ax.imshow(im[::-1])
-
-def create_animate_for_indexes(dataset, indexes):
-    images = []
-    timestamps = []
-
-    for idx in indexes:
-        data = dataset[idx]
-        im = data["image"].transpose(1, 2, 0)
-        im = dataset.rasterizer.to_rgb(im)
-        target_positions_pixels = transform_points(data["target_positions"] + data["centroid"][:2], data["world_to_image"])
-        center_in_pixels = np.asarray(cfg["raster_params"]["ego_center"]) * cfg["raster_params"]["raster_size"]
-        draw_trajectory(im, target_positions_pixels, data["target_yaws"], TARGET_POINTS_COLOR)
-        clear_output(wait=True)
-        images.append(PIL.Image.fromarray(im[::-1]))
-        timestamps.append(data["timestamp"])
-
-    anim = animate_solution(images, timestamps)
-    return anim
-
-def create_animate_for_scene(dataset, scene_idx):
-    indexes = dataset.get_scene_indices(scene_idx)
-    return create_animate_for_indexes(dataset, indexes)
 
 if __name__ == '__main__':
     # set env variable for data
@@ -413,30 +153,30 @@ if __name__ == '__main__':
         agent_dataset = CustomAgentDataset(cfg, zarr_dataset, semantic_rasterizer)
 
 
-    # Number of agents
-    n_cars = np.count_nonzero(agent_dataset.get_agent_labels() == 3)
-    n_pedestrians = np.count_nonzero(agent_dataset.get_agent_labels() == 12)
-    n_cyclists = np.count_nonzero(agent_dataset.get_agent_labels() == 14)
-
-    # Agent indices (relative to agent dataset, not zarr_dataset)
-    car_indices = list(np.nonzero(agent_dataset.get_agent_labels() == 3)[0])
-    pedestrian_indices = list(np.nonzero(agent_dataset.get_agent_labels() == 12)[0])
-    cyclists_indices = list(np.nonzero(agent_dataset.get_agent_labels() == 14)[0])
-
-    # Subsets of agent dataset
-    car_agent_dataset = Subset(agent_dataset,car_indices)
-    pedestrian_agent_dataset = Subset(agent_dataset, pedestrian_indices)
-    cyclist_agent_dataset = Subset(agent_dataset, cyclists_indices)
-
-    car_loader = DataLoader(car_agent_dataset)
-
-    tr_it = iter(car_loader)
-    history_sizes = []
-    target_sizes = []
-    for itr in range(100):
-        data = next(tr_it)
-        history_sizes.append(torch.sum(data["history_availabilities"]))
-        #target_sizes.append(torch.sum(data["target_availabilities"]))
+    # # Number of agents
+    # n_cars = np.count_nonzero(agent_dataset.get_agent_labels() == 3)
+    # n_pedestrians = np.count_nonzero(agent_dataset.get_agent_labels() == 12)
+    # n_cyclists = np.count_nonzero(agent_dataset.get_agent_labels() == 14)
+    #
+    # # Agent indices (relative to agent dataset, not zarr_dataset)
+    # car_indices = list(np.nonzero(agent_dataset.get_agent_labels() == 3)[0])
+    # pedestrian_indices = list(np.nonzero(agent_dataset.get_agent_labels() == 12)[0])
+    # cyclists_indices = list(np.nonzero(agent_dataset.get_agent_labels() == 14)[0])
+    #
+    # # Subsets of agent dataset
+    # car_agent_dataset = Subset(agent_dataset,car_indices)
+    # pedestrian_agent_dataset = Subset(agent_dataset, pedestrian_indices)
+    # cyclist_agent_dataset = Subset(agent_dataset, cyclists_indices)
+    #
+    # car_loader = DataLoader(car_agent_dataset)
+    #
+    # tr_it = iter(car_loader)
+    # history_sizes = []
+    # target_sizes = []
+    # for itr in range(100):
+    #     data = next(tr_it)
+    #     history_sizes.append(torch.sum(data["history_availabilities"]))
+    #     #target_sizes.append(torch.sum(data["target_availabilities"]))
 
 
     # Load agent mask
@@ -446,7 +186,24 @@ if __name__ == '__main__':
     agents_mask = past_mask * future_mask
     agents_indices = np.nonzero(agents_mask)[0]
 
-    # Ploting data
+    # Plotting data
+    plt.figure(0)
+    all_speeds = LA.norm(zarr_dataset.agents['velocity'][agent_dataset.agents_indices], axis=1)*3.6
+    plt.hist(all_speeds, density=True, bins=80)  # `density=False` would make counts
+    plt.ylabel('Probability')
+    plt.xlabel('Speed km/h')
+
+    ## Plotting availability for a sample of 1000 agents
+    #plt.figure(1)
+    #random_agent_idx = np.random.randint(0, len(agent_dataset), size=10000)
+    #availabilities = []
+    #for i, agent_dataset_idx in enumerate(random_agent_idx):
+    #    data = agent_dataset[agent_dataset_idx]
+    #    availabilities.append(np.sum(data["history_availabilities"]))
+    #plt.hist(availabilities, density=True, bins=11)  # `density=False` would make counts
+    #plt.ylabel('Probability')
+    #plt.xlabel('Availabilities km/h')
+    #plt.show()
 
     def moving_average(a, n=10) :
         ret = np.cumsum(a, dtype=float)
@@ -477,7 +234,13 @@ if __name__ == '__main__':
             im = agent_dataset.rasterizer.to_rgb(im)
             target_positions_pixels = data["target_positions"] + bias #transform_points(data["target_positions"] + data["centroid"][:2], data["agent_from_world"])
             draw_trajectory(im, target_positions_pixels, rgb_color=TARGET_POINTS_COLOR, radius=1, yaws=data["target_yaws"])
-            axs[0, 0].imshow(im[::-1])
+            # Plotting all the agents around the ego agent (note multiplying by 2 fro meters to pixel)
+            history_all_agents = data["history_all_agents_positions"][:]
+            for i_agent in range(history_all_agents.shape[0]):
+                history_agent_x = 2*history_all_agents[i_agent, :, 0] + bias[0]
+                history_agent_y = 2*history_all_agents[i_agent, :, 1] + bias[1]
+                axs[0, 0].scatter(history_agent_x, history_agent_y, color="red", s=1, label='ground truth hist')
+            axs[0, 0].imshow(im) # Why [::-1]
 
             # Plot position of first agent
             pos_hist = data["history_positions"] + data["centroid"][:2]
@@ -488,7 +251,7 @@ if __name__ == '__main__':
 
             # Calculate speed of car states
 
-            # Velocity
+            # Velocity (note [::-1] in the position
             pos = np.vstack((data["history_positions"][::-1], data["target_positions"]))
             #pos = pos[~np.all(pos == 0, axis=1)] # Remove zeros
             ds = np.sqrt(np.sum(np.square(np.diff(pos, axis=0)), axis=1))
