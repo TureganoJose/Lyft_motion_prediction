@@ -61,8 +61,8 @@ from torch.utils.data import Dataset, DataLoader, Subset, SubsetRandomSampler
 from torchvision.models.resnet import resnet18, resnet50, resnet34
 
 # Models
-from backbone import ResNetBackbone
-from mtp import MTP, MTPLoss
+from models.backbone import ResNetBackbone
+from models.mtp import MTP, MTPLoss
 
 if __name__ == '__main__':
     # set env variable for data
@@ -104,7 +104,7 @@ if __name__ == '__main__':
 
         'sample_data_loader': {
             'key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/sample.zarr',
-            'batch_size': 12,
+            'batch_size': 1,
             'shuffle': False,
             'num_workers': 16
         },
@@ -217,6 +217,17 @@ if __name__ == '__main__':
     b, a = signal.butter(5, w, 'low')
 
     random_agent_idx = np.random.randint(0, len(agent_dataset), size=1000)
+
+    plt.figure(1)
+    total_zeros = np.empty([1])
+    for i, agent_dataset_idx in enumerate(random_agent_idx):
+        data = agent_dataset[agent_dataset_idx]
+        history_all_agents = data["history_all_agents_positions"][:]
+        total_zeros = np.append(total_zeros, 11 - np.count_nonzero(history_all_agents, axis=1)[:, 0].T)
+    plt.hist(total_zeros, density=True, bins=11)  # `density=False` would make counts
+    plt.ylabel('Probability')
+    plt.xlabel('Number of zero values in each agent')
+
 
     while True:
         for i, agent_dataset_idx  in enumerate(random_agent_idx):

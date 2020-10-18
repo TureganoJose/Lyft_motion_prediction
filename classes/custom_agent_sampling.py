@@ -14,6 +14,7 @@ from l5kit.kinematic import Perturbation
 from l5kit.rasterization import EGO_EXTENT_HEIGHT, EGO_EXTENT_LENGTH, EGO_EXTENT_WIDTH, Rasterizer, RenderContext
 from l5kit.sampling import get_future_slice, get_history_slice
 
+import math
 
 def custom_generate_agent_sample(
     state_index: int,
@@ -33,10 +34,8 @@ def custom_generate_agent_sample(
     """Generates the inputs and targets to train a deep prediction model. A deep prediction model takes as input
     the state of the world (here: an image we will call the "raster"), and outputs where that agent will be some
     seconds into the future.
-
     This function has a lot of arguments and is intended for internal use, you should try to use higher level classes
     and partials that use this function.
-
     Args:
         state_index (int): The anchor frame index, i.e. the "current" timestep in the scene
         frames (np.ndarray): The scene frames array, can be numpy array or a zarr array
@@ -57,11 +56,9 @@ def custom_generate_agent_sample(
         rasterizer (Optional[Rasterizer]): Rasterizer of some sort that draws a map image
         perturbation (Optional[Perturbation]): Object that perturbs the input and targets, used
 to train models that can recover from slight divergence from training set data
-
     Raises:
         ValueError: A ValueError is returned if the specified ``selected_track_id`` is not present in the scene
         or was filtered by applying the ``filter_agent_threshold`` probability filtering.
-
     Returns:
         dict: a dict object with the raster array, the future offset coordinates (meters),
         the future yaw angular offset, the future_availability as a binary mask
@@ -140,21 +137,29 @@ to train models that can recover from slight divergence from training set data
     # Extract track ids of all the neighbouring agents
     agents_track_ids = _custom_get_track_ids_from_frames(history_frames, history_agents)
 
-    # getting the history from all the agents (no
+    # getting the history from all the agents
     num_agents = agents_track_ids.shape[0]
     agents_coords_offset = np.empty([num_agents, history_num_frames + 1, 2])
+    agents_velocity = np.empty([num_agents, history_num_frames + 1, 2])
     for i, agent_track_id in enumerate(agents_track_ids):
-        agent_coords_offset, agent_yaws_offset, agent_availability = _custom_create_targets_for_deep_prediction(
+        agent_coords_offset, agent_yaws_offset, agent_availability, agent_velocity = _custom_create_targets_for_lstm_encoding(
             history_num_frames + 1, history_frames, agent_track_id, history_agents, agent_from_world, agent_yaw_rad
         )
         agents_coords_offset[i, :, :] = agent_coords_offset
+        agents_velocity[i, :, :] = agent_velocity
+
+    #distances = np.LA.norm(agents_coords_offset[:, 0, :], axis=1) # distance to ego agent @main time frame.
+    sorted_indeces = np.argsort(-np.count_nonzero(agents_coords_offset, axis=1)[:, 0])
+    sorted_agents_coords_offsets = agents_coords_offset[sorted_indeces, :, :]
+    sorted_agents_velocity_offsets = agents_velocity[sorted_indeces, :, :]
+
     return {
         "image": input_im,
         "target_positions": future_coords_offset,
         "target_yaws": future_yaws_offset,
         "target_availabilities": future_availability,
         "history_positions": history_coords_offset,
-        "history_all_agents_positions": agents_coords_offset,
+        "history_all_agents_positions": sorted_agents_coords_offsets,
         "history_yaws": history_yaws_offset,
         "history_availabilities": history_availability,
         "world_to_image": raster_from_world,  # TODO deprecate
@@ -166,7 +171,9 @@ to train models that can recover from slight divergence from training set data
         "yaw": agent_yaw_rad,
         "extent": agent_extent_m,
         "velocity": velocity_agent,
-        "label": label
+        "velocity_all_agents": sorted_agents_velocity_offsets,
+        "label": label,
+        "num_agents": num_agents
     }
 
 def _custom_get_track_ids_from_frames(
@@ -191,7 +198,6 @@ def _custom_create_targets_for_deep_prediction(
     Internal function that creates the targets and availability masks for deep prediction-type models.
     The futures/history offset (in meters) are computed. When no info is available (e.g. agent not in frame)
     a 0 is set in the availability array (1 otherwise).
-
     Args:
         num_frames (int): number of offset we want in the future/history
         frames (np.ndarray): available frames. This may be less than num_frames
@@ -199,10 +205,8 @@ def _custom_create_targets_for_deep_prediction(
         agents (List[np.ndarray]): list of agents arrays (same len of frames)
         agent_from_world (np.ndarray): local from world matrix
         current_agent_yaw (float): angle of the agent at timestep 0
-
     Returns:
         Tuple[np.ndarray, np.ndarray, np.ndarray]: position offsets, angle offsets, availabilities
-
     """
     # How much the coordinates differ from the current state in meters.
     coords_offset = np.zeros((num_frames, 2), dtype=np.float32)
@@ -218,7 +222,7 @@ def _custom_create_targets_for_deep_prediction(
             try:
                 agent = filter_agents_by_track_id(frame_agents, selected_track_id)[0]
                 agent_centroid = agent["centroid"]
-                agent_yaw = agent["yaw"]						  
+                agent_yaw = agent["yaw"]
             except IndexError:
                 availability[i] = 0.0  # keep track of invalid futures/history
                 continue
@@ -227,3 +231,52 @@ def _custom_create_targets_for_deep_prediction(
         yaws_offset[i] = angular_distance(agent_yaw, current_agent_yaw)
         availability[i] = 1.0
     return coords_offset, yaws_offset, availability
+
+def _custom_create_targets_for_lstm_encoding(
+    num_frames: int,
+    frames: np.ndarray,
+    selected_track_id: Optional[int],
+    agents: List[np.ndarray],
+    agent_from_world: np.ndarray,
+    current_agent_yaw: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Internal function that creates the targets and availability masks for deep prediction-type models.
+    The futures/history offset (in meters) are computed. When no info is available (e.g. agent not in frame)
+    a 0 is set in the availability array (1 otherwise).
+    Args:
+        num_frames (int): number of offset we want in the future/history
+        frames (np.ndarray): available frames. This may be less than num_frames
+        selected_track_id (Optional[int]): agent track_id or AV (None)
+        agents (List[np.ndarray]): list of agents arrays (same len of frames)
+        agent_from_world (np.ndarray): local from world matrix
+        current_agent_yaw (float): angle of the agent at timestep 0
+    Returns:
+        Tuple[np.ndarray, np.ndarray, np.ndarray]: position offsets, angle offsets, availabilities
+    """
+    # How much the coordinates differ from the current state in meters.
+    coords_offset = np.zeros((num_frames, 2), dtype=np.float32)
+    yaws_offset = np.zeros((num_frames, 1), dtype=np.float32)
+    availability = np.zeros((num_frames,), dtype=np.float32)
+    velocity = np.zeros((num_frames, 2), dtype=np.float32)
+
+    for i, (frame, frame_agents) in enumerate(zip(frames, agents)):
+        if selected_track_id is None:
+            agent_centroid = frame["ego_translation"][:2]
+            agent_yaw = rotation33_as_yaw(frame["ego_rotation"])
+        else:
+            # it's not guaranteed the target will be in every frame
+            try:
+                agent = filter_agents_by_track_id(frame_agents, selected_track_id)[0]
+                agent_centroid = agent["centroid"]
+                agent_yaw = agent["yaw"]
+                agent_velocity = np.linalg.norm(agent["velocity"])
+            except IndexError:
+                availability[i] = 0.0  # keep track of invalid futures/history
+                continue
+
+        coords_offset[i] = transform_point(agent_centroid, agent_from_world)
+        yaws_offset[i] = angular_distance(agent_yaw, current_agent_yaw)
+        availability[i] = 1.0
+        velocity[i] = np.array([agent_velocity * math.cos(yaws_offset[i]), agent_velocity * math.sin(yaws_offset[i])])
+    return coords_offset, yaws_offset, availability, velocity

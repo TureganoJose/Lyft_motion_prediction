@@ -60,7 +60,7 @@ from torch.utils.data import Dataset, DataLoader, Subset, SubsetRandomSampler
 from torchvision.models.resnet import resnet18, resnet50, resnet34
 
 # models
-from models import LyftMultiModel, forward, LyftMultiModel_carstates
+from models.models import LyftMultiModel, forward, LyftMultiModel_carstates
 
 # loss functions
 from loss_functions import pytorch_neg_multi_log_likelihood_batch

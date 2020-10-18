@@ -1,0 +1,245 @@
+from loss_functions import pytorch_neg_multi_log_likelihood_batch
+
+from torch.utils.data import Dataset, DataLoader, Subset, SubsetRandomSampler
+
+from classes.custom_classes import CustomAgentDataset, CustomEgoDataset
+import numpy as np
+from tqdm import tqdm
+
+import os
+
+PATH_TO_DATA = "../input/lyft-motion-prediction-autonomous-vehicles"
+os.environ["L5KIT_DATA_FOLDER"] = PATH_TO_DATA
+
+# level5 toolkit
+import l5kit
+
+print(l5kit.__version__)
+from l5kit.data import PERCEPTION_LABELS
+from l5kit.dataset import EgoDataset, AgentDataset
+from l5kit.data import ChunkedDataset, LocalDataManager
+from l5kit.data.filter import filter_agents_by_track_id, filter_agents_by_labels
+
+# level5 toolkit
+from l5kit.configs import load_config_data
+from l5kit.geometry import transform_points
+from l5kit.rasterization import build_rasterizer
+from l5kit.visualization import draw_trajectory, draw_reference_trajectory, TARGET_POINTS_COLOR
+from l5kit.evaluation import write_pred_csv, compute_metrics_csv, read_gt_csv, create_chopped_dataset
+from l5kit.evaluation.chop_dataset import MIN_FUTURE_STEPS
+from l5kit.evaluation.metrics import neg_multi_log_likelihood, time_displace
+
+
+import torch
+from torch import nn, optim
+
+from torchvision.models.resnet import resnet50, resnet18, resnet34, resnet101
+from torchvision.models import mobilenet_v2
+from torch import nn
+from torch import Tensor
+from typing import Dict
+from pathlib import Path
+
+from torch import nn, optim
+from torch.utils.data import DataLoader
+from torch.utils.data.dataset import Subset
+from models.lstm_simple import DecoderLSTM_LyftModel
+
+
+
+cfg = {
+    'model_params': {
+        'model_architecture': 'resnet18',
+        'history_num_frames': 10,
+        'lr': 1e-3,
+        'history_step_size': 1,
+        'history_delta_time': 0.1,
+        'future_num_frames': 50,
+        'future_step_size': 1,
+        'future_delta_time': 0.1,
+        'train': True
+    },
+
+    'raster_params': {
+        'raster_size': [224, 224],
+        'pixel_size': [0.5, 0.5],
+        'ego_center': [0.25, 0.5],
+        'map_type': 'py_semantic',
+        'satellite_map_key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/aerial_map/aerial_map.png',
+        'semantic_map_key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/semantic_map/semantic_map.pb',
+        'dataset_meta_key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/meta.json',
+        'filter_agents_threshold': 0.5,
+        'disable_traffic_light_faces': False
+    },
+
+    'train_data_loader': {
+        'key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/train.zarr',
+        'batch_size': 32,
+        'shuffle': True,
+        'num_workers': 0
+    },
+
+    'sample_data_loader': {
+        'key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/sample.zarr',
+        'batch_size': 32,
+        'shuffle': True,
+        'num_workers': 0
+    },
+    "valid_data_loader": {
+        'key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/validate.zarr',
+         "batch_size": 1,
+         "shuffle": False,
+         "num_workers": 0},
+    'test_data_loader': {
+        'key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/test.zarr',
+        'batch_size': 8,
+        'shuffle': False,
+        'num_workers': 0
+    },
+
+    'train_params': {
+        'checkpoint_every_n_steps': 1000,
+        'max_num_steps': 5000
+    },
+
+    'test_params': {
+        'image_coords': True
+
+    }
+}
+
+
+def train(device, model, train_dataset, train_dataloader, valid_dataloader, opt=None, criterion=None, lrate=1e-4):
+    """Function for training the model"""
+    print("Training...")
+    losses = []
+    progress = tqdm(range(cfg["train_params"]["max_num_steps"]))
+    train_iter = iter(train_dataloader)
+    val_iter = []  # iter(valid_dataloader)
+
+    for i in progress:
+        try:
+            data = next(train_iter)
+        except StopIteration:
+            train_iter = iter(train_dataloader)
+            data = next(train_iter)
+
+        model.train()
+        torch.set_grad_enabled(True)
+
+
+        # Forward pass
+        history_positions = data['history_positions'].to(device)
+        all_history_positions = data['history_all_agents_positions'].to(device)
+        target_availabilities = data["target_availabilities"].to(device)
+        targets, confidences = data["target_positions"].to(device)
+        lengths = data["num_agents"].to(device)
+
+        inputs = torch.nn.utils.rnn.pack_padded_sequence(history_positions, lengths, batch_first=True)
+        outputs = model(history_positions)
+        loss = criterion(targets, outputs, confidences, target_availabilities)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        # Validation
+        if VALIDATION:
+            with torch.no_grad():
+                try:
+                    val_data = next(val_iter)
+                except StopIteration:
+                    val_iter = iter(valid_dataloader)
+                    val_data = next(val_iter)
+
+
+                # val_loss, _ = forward(val_data, model, device, criterion)
+            desc = f"Loss: {round(loss.item(), 4)} Validation Loss: {round(val_loss.item(), 4)}"
+        else:
+            desc = f"Loss: {round(loss.item(), 4)}"
+
+        # Save checkpoint
+        if (i + 1) % cfg['train_params']['checkpoint_every_n_steps'] == 0:
+            torch.save({'epoch': i + 1,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict()},
+                       f'MNv2_carstates_{i}.pth')
+        progress.set_description(desc)
+
+    return model
+
+
+VALIDATION = False  # A hyperparameter you could use to toggle for validating the model
+PRETRAINED = False
+
+def collate_fn(data):
+    """
+       data: is a list of tuples with (example, label, length)
+             where 'example' is a tensor of arbitrary shape
+             and label/length are scalars
+    """
+    _, labels, lengths = zip(*data)
+    max_len = max(lengths)
+    n_ftrs = data[0][0].size(1)
+    features = torch.zeros((len(data), max_len, n_ftrs))
+    labels = torch.tensor(labels)
+    lengths = torch.tensor(lengths)
+
+    for i in range(len(data)):
+        j, k = data[i][0].size(0), data[i][0].size(1)
+        features[i] = torch.cat([data[i][0], torch.zeros((max_len - j, k))])
+
+    return features.float(), labels.long(), lengths.long()
+
+
+# %% [code]
+if __name__ == '__main__':
+    # ===== LOAD TRAINING DATASET
+    dm = LocalDataManager(None)
+    train_cfg = cfg["sample_data_loader"]
+    rasterizer = build_rasterizer(cfg, dm)
+    train_zarr = ChunkedDataset(dm.require(train_cfg["key"])).open()
+    train_dataset = CustomAgentDataset(cfg, train_zarr, rasterizer)
+    # train_sub_dataset = torch.utils.data.Subset(train_dataset, range(100))
+    train_dataloader = DataLoader(train_dataset, shuffle=train_cfg["shuffle"], batch_size=train_cfg["batch_size"],
+                                  num_workers=train_cfg["num_workers"])
+    print("==================================TRAIN DATA==================================")
+    print(train_dataset)
+
+    if VALIDATION:
+        # ===== LOAD VALIDATION DATASET
+        valid_cfg = cfg["valid_data_loader"]
+        validate_zarr = ChunkedDataset(dm.require(valid_cfg["key"])).open()
+        valid_dataset = CustomAgentDataset(cfg, validate_zarr, rasterizer)
+        # valid_sub_dataset = torch.utils.data.Subset(valid_dataset, range(100))
+        valid_dataloader = DataLoader(valid_dataset, shuffle=valid_cfg["shuffle"], batch_size=valid_cfg["batch_size"],
+                                      num_workers=valid_cfg["num_workers"])
+        print("==================================VALIDATION DATA==================================")
+        print(valid_dataset)
+    else:
+        valid_dataloader = []
+
+    # ==== TRAIN LOOP
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    model = DecoderLSTM_LyftModel(cfg)
+    optimizer = optim.Adam(model.parameters(), lr=cfg["model_params"]["lr"])
+    model.to(device)
+
+    if PRETRAINED:
+        WEIGHT_FILE = 'MNv2_carstates_4999.pth'
+        checkpoint = torch.load(WEIGHT_FILE, map_location=device)
+        epoch = checkpoint['epoch']
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    print(model)
+
+    criterion = pytorch_neg_multi_log_likelihood_batch
+
+    model = train(device, model, train_dataset, train_dataloader, valid_dataloader, optimizer, criterion,
+                  lrate=cfg['model_params']['lr'])
+
+    # ===== SAVING MODEL
+    print("Saving the model...")
+    torch.save(model.state_dict(), "MNv2_carstates.pth")
+    print('model saved')
+

@@ -25,17 +25,17 @@ from classes.custom_agent_sampling import custom_generate_agent_sample
 MIN_FRAME_HISTORY = 10  # minimum number of frames an agents must have in the past to be picked
 MIN_FRAME_FUTURE = 10  # minimum number of frames an agents must have in the future to be picked
 
+
 class CustomEgoDataset(Dataset):
     def __init__(
-        self,
-        cfg: dict,
-        zarr_dataset: ChunkedDataset,
-        rasterizer: Rasterizer,
-        perturbation: Optional[Perturbation] = None,
+            self,
+            cfg: dict,
+            zarr_dataset: ChunkedDataset,
+            rasterizer: Rasterizer,
+            perturbation: Optional[Perturbation] = None,
     ):
         """
         Get a PyTorch dataset object that can be used to train DNN
-
         Args:
             cfg (dict): configuration file
             zarr_dataset (ChunkedDataset): the raw zarr dataset
@@ -54,11 +54,11 @@ None if not desired
             raster_size_px=np.array(cfg["raster_params"]["raster_size"]),
             pixel_size_m=np.array(cfg["raster_params"]["pixel_size"]),
             center_in_raster_ratio=np.array(cfg["raster_params"]["ego_center"]),
-        )		   
+        )
         # build a partial so we don't have to access cfg each time
         self.custom_sample_function = partial(
             custom_generate_agent_sample,
-			render_context=render_context,
+            render_context=render_context,
             history_num_frames=cfg["model_params"]["history_num_frames"],
             history_step_size=cfg["model_params"]["history_step_size"],
             future_num_frames=cfg["model_params"]["future_num_frames"],
@@ -71,7 +71,6 @@ None if not desired
     def __len__(self) -> int:
         """
         Get the number of available AV frames
-
         Returns:
             int: the number of elements in the dataset
         """
@@ -80,7 +79,6 @@ None if not desired
     def get_frame(self, scene_index: int, state_index: int, track_id: Optional[int] = None) -> dict:
         """
         A utility function to get the rasterisation and trajectory target for a given agent in a given frame
-
         Args:
             scene_index (int): the index of the scene in the zarr
             state_index (int): a relative frame index in the scene
@@ -88,7 +86,6 @@ None if not desired
         Returns:
             dict: the rasterised image, the target trajectory (position and yaw) along with their availability,
             the 2D matrix to center that agent, the agent track (-1 if ego) and the timestamp
-
         """
         frames = self.dataset.frames[get_frames_slice_from_scenes(self.dataset.scenes[scene_index])]
 
@@ -101,7 +98,7 @@ None if not desired
                 "disable_traffic_light_faces not found in config, this will raise an error in the future",
                 RuntimeWarning,
                 stacklevel=2,
-            )		
+            )
         data = self.custom_sample_function(state_index, frames, self.dataset.agents, self.dataset.tl_faces, track_id)
         # 0,1,C -> C,0,1
         image = data["image"].transpose(2, 0, 1)
@@ -120,10 +117,10 @@ None if not desired
         dt = 0.1
 
         speed = np.sqrt(data["velocity"][0] ** 2 + data["velocity"][1] ** 2)
-        yaw_hist_mean = np.sum(history_yaws)/n_hist
+        yaw_hist_mean = np.sum(history_yaws) / n_hist
         pos = history_positions[::-1]
         ds = np.sqrt(np.sum(np.square(np.diff(pos, axis=0)), axis=1))
-        velocity = 3.6 * ds/dt# km/h
+        velocity = 3.6 * ds / dt  # km/h
         acc_avg = (velocity[-1] - velocity[0]) / (n_hist * dt)
         car_states = np.array([speed, yaw_hist_mean, acc_avg, data["extent"][0]], dtype=np.float32)
 
@@ -142,26 +139,25 @@ None if not desired
             "raster_from_world": data["raster_from_world"],
             "raster_from_agent": data["raster_from_agent"],
             "agent_from_world": data["agent_from_world"],
-            "world_from_agent": data["world_from_agent"],										 
+            "world_from_agent": data["world_from_agent"],
             "track_id": track_id,
             "timestamp": timestamp,
             "centroid": data["centroid"],
             "yaw": data["yaw"],
             "extent": data["extent"],
             "velocity": data["velocity"],
+            "agents_velocity": data["velocity_all_agents"],
             "label": label,
             "car_states": car_states,
+            "num_agents": data["num_agents"]
         }
 
     def __getitem__(self, index: int) -> dict:
         """
         Function called by Torch to get an element
-
         Args:
             index (int): index of the element to retrieve
-
         Returns: please look get_frame signature and docstring
-
         """
         if index < 0:
             if -index > len(self):
@@ -180,16 +176,13 @@ None if not desired
         """
         Returns another EgoDataset dataset where the underlying data can be modified.
         This is possible because, even if it supports the same interface, this dataset is np.ndarray based.
-
         Args:
             scene_index (int): the scene index of the new dataset
-
         Returns:
             EgoDataset: A valid EgoDataset dataset with a copy of the data
-
         """
         # copy everything to avoid references (scene is already detached from zarr if get_combined_scene was called)
-        scenes = self.dataset.scenes[scene_index : scene_index + 1].copy()
+        scenes = self.dataset.scenes[scene_index: scene_index + 1].copy()
         frame_slice = get_frames_slice_from_scenes(*scenes)
         frames = self.dataset.frames[frame_slice].copy()
         agent_slice = get_agents_slice_from_frames(*frames[[0, -1]])
@@ -216,7 +209,6 @@ None if not desired
         of finding the scene boundaries.
         Args:
             scene_idx (int): index of the scene
-
         Returns:
             np.ndarray: indices that can be used for indexing with __getitem__
         """
@@ -229,7 +221,6 @@ None if not desired
         Get indices for the given frame. EgoDataset iterates over frames, so this will be a single element
         Args:
             frame_idx (int): index of the scene
-
         Returns:
             np.ndarray: indices that can be used for indexing with __getitem__
         """
@@ -240,16 +231,17 @@ None if not desired
     def __str__(self) -> str:
         return self.dataset.__str__()
 
+
 class CustomAgentDataset(CustomEgoDataset):
     def __init__(
-        self,
-        cfg: dict,
-        zarr_dataset: ChunkedDataset,
-        rasterizer: Rasterizer,
-        perturbation: Optional[Perturbation] = None,
-        agents_mask: Optional[np.ndarray] = None,
-        min_frame_history: int = MIN_FRAME_HISTORY,
-        min_frame_future: int = MIN_FRAME_FUTURE,
+            self,
+            cfg: dict,
+            zarr_dataset: ChunkedDataset,
+            rasterizer: Rasterizer,
+            perturbation: Optional[Perturbation] = None,
+            agents_mask: Optional[np.ndarray] = None,
+            min_frame_history: int = MIN_FRAME_HISTORY,
+            min_frame_future: int = MIN_FRAME_FUTURE,
     ):
         assert perturbation is None, "AgentDataset does not support perturbation (yet)"
 
@@ -285,7 +277,6 @@ class CustomAgentDataset(CustomEgoDataset):
         """
         Loads a boolean mask of the agent availability stored into the zarr. Performs some sanity check against cfg.
         Returns: a boolean mask of the same length of the dataset agents
-
         """
         agent_prob = self.cfg["raster_params"]["filter_agents_threshold"]
 
@@ -314,7 +305,6 @@ class CustomAgentDataset(CustomEgoDataset):
         """
         length of the available and reliable agents (filtered using the mask)
         Returns: the length of the dataset
-
         """
         return len(self.agents_indices)
 
@@ -326,7 +316,7 @@ class CustomAgentDataset(CustomEgoDataset):
             if -index > len(self):
                 raise ValueError("absolute value of index should not exceed dataset length")
             index = len(self) + index
-        index = self.agents_indices[index] # bad practice here
+        index = self.agents_indices[index]  # bad practice here
         track_id = self.dataset.agents[index]["track_id"]
         frame_index = bisect.bisect_right(self.cumulative_sizes_agents, index)
         scene_index = bisect.bisect_right(self.cumulative_sizes, frame_index)
@@ -335,7 +325,7 @@ class CustomAgentDataset(CustomEgoDataset):
             state_index = frame_index
         else:
             state_index = frame_index - self.cumulative_sizes[scene_index - 1]
-        return self.get_frame(scene_index, state_index,  track_id=track_id) #.update({'label': agent_label})
+        return self.get_frame(scene_index, state_index, track_id=track_id)  # .update({'label': agent_label})
 
     def get_scene_dataset(self, scene_index: int) -> "CustomAgentDataset":
         """
@@ -362,7 +352,6 @@ class CustomAgentDataset(CustomEgoDataset):
         This means ``__getitem__(0)`` matches the first valid agent in the dataset.
         Args:
             scene_idx (int): index of the scene
-
         Returns:
             np.ndarray: indices that can be used for indexing with __getitem__
         """
@@ -381,11 +370,10 @@ class CustomAgentDataset(CustomEgoDataset):
         This means ``__getitem__(0)`` matches the first valid agent in the dataset.
         Args:
             frame_idx (int): index of the scene
-
         Returns:
             np.ndarray: indices that can be used for indexing with __getitem__
         """
-									
+
         assert frame_idx < len(self.dataset.frames), f"frame_idx {frame_idx} is over len {len(self.dataset.frames)}"
 
         # avoid accessing zarr here as we already have the information in `cumulative_sizes_agents`
