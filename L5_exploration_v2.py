@@ -218,7 +218,18 @@ if __name__ == '__main__':
 
     random_agent_idx = np.random.randint(0, len(agent_dataset), size=1000)
 
-    plt.figure(1)
+    plt.figure(3)
+    total_n_agents = np.empty([1])
+    for i, agent_dataset_idx in enumerate(random_agent_idx):
+        data = agent_dataset[agent_dataset_idx]
+        total_n_agents = np.append(total_n_agents, data["num_agents"])
+    plt.hist(total_n_agents, density=True, bins=200)  # `density=False` would make counts
+    plt.ylabel('Probability')
+    plt.xlabel('Number of agents')
+
+
+
+    plt.figure(2)
     total_zeros = np.empty([1])
     for i, agent_dataset_idx in enumerate(random_agent_idx):
         data = agent_dataset[agent_dataset_idx]

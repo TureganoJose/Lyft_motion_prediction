@@ -137,21 +137,32 @@ to train models that can recover from slight divergence from training set data
     # Extract track ids of all the neighbouring agents
     agents_track_ids = _custom_get_track_ids_from_frames(history_frames, history_agents)
 
+    # Remove the ego agent (or reference agent)
+    agents_track_ids = agents_track_ids[agents_track_ids!=selected_track_id]
+
     # getting the history from all the agents
     num_agents = agents_track_ids.shape[0]
     agents_coords_offset = np.empty([num_agents, history_num_frames + 1, 2])
     agents_velocity = np.empty([num_agents, history_num_frames + 1, 2])
+    agents_availability = np.empty([num_agents, history_num_frames + 1, 1])
+    agents_distance = np.empty([num_agents, history_num_frames + 1, 1])
+
     for i, agent_track_id in enumerate(agents_track_ids):
-        agent_coords_offset, agent_yaws_offset, agent_availability, agent_velocity = _custom_create_targets_for_lstm_encoding(
-            history_num_frames + 1, history_frames, agent_track_id, history_agents, agent_from_world, agent_yaw_rad
+        agent_coords_offset, agent_yaws_offset, agent_availability, agent_velocity, agent_distance = _custom_create_targets_for_lstm_encoding(
+            history_num_frames + 1, history_frames, agent_track_id, history_agents, agent_from_world, agent_yaw_rad,
+            history_coords_offset
         )
         agents_coords_offset[i, :, :] = agent_coords_offset
         agents_velocity[i, :, :] = agent_velocity
+        agents_availability[i, :, 0] = agent_availability
+        agents_distance[i, :, 0] = agent_distance.squeeze()
 
-    #distances = np.LA.norm(agents_coords_offset[:, 0, :], axis=1) # distance to ego agent @main time frame.
-    sorted_indeces = np.argsort(-np.count_nonzero(agents_coords_offset, axis=1)[:, 0])
+    #sorted_indeces = np.argsort(-np.count_nonzero(agents_coords_offset, axis=1)[:, 0]) # Sort by num of agents
+    sorted_indeces = np.argsort(agents_distance[:, 0, 0])
     sorted_agents_coords_offsets = agents_coords_offset[sorted_indeces, :, :]
     sorted_agents_velocity_offsets = agents_velocity[sorted_indeces, :, :]
+    sorted_agents_availability = agents_availability[sorted_indeces, :, :]
+    sorted_agents_distance = agents_distance[sorted_indeces, :, :]
 
     return {
         "image": input_im,
@@ -172,6 +183,8 @@ to train models that can recover from slight divergence from training set data
         "extent": agent_extent_m,
         "velocity": velocity_agent,
         "velocity_all_agents": sorted_agents_velocity_offsets,
+        "availability_all_agents": sorted_agents_availability,
+        "distance_all_agents": sorted_agents_distance,
         "label": label,
         "num_agents": num_agents
     }
@@ -239,7 +252,8 @@ def _custom_create_targets_for_lstm_encoding(
     agents: List[np.ndarray],
     agent_from_world: np.ndarray,
     current_agent_yaw: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ego_agent_coords_offset: np.ndarray # This is not necessarily the AV, just the reference agent
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Internal function that creates the targets and availability masks for deep prediction-type models.
     The futures/history offset (in meters) are computed. When no info is available (e.g. agent not in frame)
@@ -259,6 +273,7 @@ def _custom_create_targets_for_lstm_encoding(
     yaws_offset = np.zeros((num_frames, 1), dtype=np.float32)
     availability = np.zeros((num_frames,), dtype=np.float32)
     velocity = np.zeros((num_frames, 2), dtype=np.float32)
+    distance_to_ego_agent = np.zeros((num_frames, 1), dtype=np.float32)
 
     for i, (frame, frame_agents) in enumerate(zip(frames, agents)):
         if selected_track_id is None:
@@ -273,10 +288,12 @@ def _custom_create_targets_for_lstm_encoding(
                 agent_velocity = np.linalg.norm(agent["velocity"])
             except IndexError:
                 availability[i] = 0.0  # keep track of invalid futures/history
+                distance_to_ego_agent[i] = 500.0  # if it is not available, it is very far
                 continue
 
         coords_offset[i] = transform_point(agent_centroid, agent_from_world)
         yaws_offset[i] = angular_distance(agent_yaw, current_agent_yaw)
         availability[i] = 1.0
         velocity[i] = np.array([agent_velocity * math.cos(yaws_offset[i]), agent_velocity * math.sin(yaws_offset[i])])
-    return coords_offset, yaws_offset, availability, velocity
+        distance_to_ego_agent[i] = np.linalg.norm(coords_offset[i] - ego_agent_coords_offset[i], axis=0)
+    return coords_offset, yaws_offset, availability, velocity, distance_to_ego_agent
