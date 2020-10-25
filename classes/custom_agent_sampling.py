@@ -134,6 +134,7 @@ to train models that can recover from slight divergence from training set data
         history_num_frames + 1, history_frames, selected_track_id, history_agents, agent_from_world, agent_yaw_rad
     )
 
+
     # Extract track ids of all the neighbouring agents
     agents_track_ids = _custom_get_track_ids_from_frames(history_frames, history_agents)
 
@@ -146,9 +147,10 @@ to train models that can recover from slight divergence from training set data
     agents_velocity = np.empty([num_agents, history_num_frames + 1, 2])
     agents_availability = np.empty([num_agents, history_num_frames + 1, 1])
     agents_distance = np.empty([num_agents, history_num_frames + 1, 1])
+    agents_state_vector = np.empty([num_agents, 7, history_num_frames + 1])
 
     for i, agent_track_id in enumerate(agents_track_ids):
-        agent_coords_offset, agent_yaws_offset, agent_availability, agent_velocity, agent_distance = _custom_create_targets_for_lstm_encoding(
+        agent_coords_offset, agent_yaws_offset, agent_availability, agent_velocity, agent_distance, agent_state_vector = _custom_create_targets_for_lstm_encoding(
             history_num_frames + 1, history_frames, agent_track_id, history_agents, agent_from_world, agent_yaw_rad,
             history_coords_offset
         )
@@ -156,6 +158,7 @@ to train models that can recover from slight divergence from training set data
         agents_velocity[i, :, :] = agent_velocity
         agents_availability[i, :, 0] = agent_availability
         agents_distance[i, :, 0] = agent_distance.squeeze()
+        agents_state_vector[i, :, :] = agent_state_vector
 
     #sorted_indeces = np.argsort(-np.count_nonzero(agents_coords_offset, axis=1)[:, 0]) # Sort by num of agents
     sorted_indeces = np.argsort(agents_distance[:, 0, 0])
@@ -163,6 +166,16 @@ to train models that can recover from slight divergence from training set data
     sorted_agents_velocity_offsets = agents_velocity[sorted_indeces, :, :]
     sorted_agents_availability = agents_availability[sorted_indeces, :, :]
     sorted_agents_distance = agents_distance[sorted_indeces, :, :]
+    sorted_agents_state_vector = agents_state_vector[sorted_indeces, :, :]
+    sorted_agents_state_vector = sorted_agents_state_vector.reshape((num_agents*7, history_num_frames + 1))
+
+    padded_agents_state_vector = np.zeros((100*7, history_num_frames + 1))
+    padded_agents_state_vector[:sorted_agents_state_vector.shape[0], :sorted_agents_state_vector.shape[1]]=sorted_agents_state_vector
+
+    # full state vector of reference/ego agent
+    agent_coords_offset, agent_yaws_offset, agent_availability, agent_velocity, agent_distance, ego_agent_state_vector = _custom_create_targets_for_lstm_encoding(
+        history_num_frames + 1, history_frames, selected_track_id, history_agents, agent_from_world, agent_yaw_rad,
+        history_coords_offset)
 
     return {
         "image": input_im,
@@ -170,7 +183,7 @@ to train models that can recover from slight divergence from training set data
         "target_yaws": future_yaws_offset,
         "target_availabilities": future_availability,
         "history_positions": history_coords_offset,
-        "history_all_agents_positions": sorted_agents_coords_offsets,
+        #"history_all_agents_positions": sorted_agents_coords_offsets,
         "history_yaws": history_yaws_offset,
         "history_availabilities": history_availability,
         "world_to_image": raster_from_world,  # TODO deprecate
@@ -182,11 +195,13 @@ to train models that can recover from slight divergence from training set data
         "yaw": agent_yaw_rad,
         "extent": agent_extent_m,
         "velocity": velocity_agent,
-        "velocity_all_agents": sorted_agents_velocity_offsets,
-        "availability_all_agents": sorted_agents_availability,
-        "distance_all_agents": sorted_agents_distance,
+        #"velocity_all_agents": sorted_agents_velocity_offsets,
+        #"availability_all_agents": sorted_agents_availability,
+        #"distance_all_agents": sorted_agents_distance,
         "label": label,
-        "num_agents": num_agents
+        "num_agents": num_agents,
+        "agents_state_vector": padded_agents_state_vector,
+        "ego_agent_state_vector": ego_agent_state_vector
     }
 
 def _custom_get_track_ids_from_frames(
@@ -253,7 +268,7 @@ def _custom_create_targets_for_lstm_encoding(
     agent_from_world: np.ndarray,
     current_agent_yaw: float,
     ego_agent_coords_offset: np.ndarray # This is not necessarily the AV, just the reference agent
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray , np.ndarray]:
     """
     Internal function that creates the targets and availability masks for deep prediction-type models.
     The futures/history offset (in meters) are computed. When no info is available (e.g. agent not in frame)
@@ -274,6 +289,7 @@ def _custom_create_targets_for_lstm_encoding(
     availability = np.zeros((num_frames,), dtype=np.float32)
     velocity = np.zeros((num_frames, 2), dtype=np.float32)
     distance_to_ego_agent = np.zeros((num_frames, 1), dtype=np.float32)
+    agent_state_vector = np.zeros((7, num_frames), dtype=np.float32)
 
     for i, (frame, frame_agents) in enumerate(zip(frames, agents)):
         if selected_track_id is None:
@@ -296,4 +312,7 @@ def _custom_create_targets_for_lstm_encoding(
         availability[i] = 1.0
         velocity[i] = np.array([agent_velocity * math.cos(yaws_offset[i]), agent_velocity * math.sin(yaws_offset[i])])
         distance_to_ego_agent[i] = np.linalg.norm(coords_offset[i] - ego_agent_coords_offset[i], axis=0)
-    return coords_offset, yaws_offset, availability, velocity, distance_to_ego_agent
+
+        agent_state_vector = np.vstack( (coords_offset.T, yaws_offset.T,
+                                         availability, velocity.T,  distance_to_ego_agent.T))
+    return coords_offset, yaws_offset, availability, velocity, distance_to_ego_agent, agent_state_vector

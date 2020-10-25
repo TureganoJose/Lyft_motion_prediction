@@ -132,7 +132,7 @@ None if not desired
             "target_yaws": target_yaws,
             "target_availabilities": data["target_availabilities"],
             "history_positions": history_positions,
-            "history_all_agents_positions": data["history_all_agents_positions"],
+            #"history_all_agents_positions": data["history_all_agents_positions"],
             "history_yaws": history_yaws,
             "history_availabilities": data["history_availabilities"],
             "world_to_image": data["raster_from_world"],  # TODO deprecate
@@ -146,10 +146,12 @@ None if not desired
             "yaw": data["yaw"],
             "extent": data["extent"],
             "velocity": data["velocity"],
-            "agents_velocity": data["velocity_all_agents"],
+            #"agents_velocity": data["velocity_all_agents"],
             "label": label,
             "car_states": car_states,
-            "num_agents": data["num_agents"]
+            "num_agents": data["num_agents"],
+            "agents_state_vector": data["agents_state_vector"],
+            "ego_agent_state_vector": data["ego_agent_state_vector"]
         }
 
     def __getitem__(self, index: int) -> dict:

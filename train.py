@@ -43,7 +43,7 @@ from pathlib import Path
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Subset
-from models.lstm_simple import DecoderLSTM_LyftModel
+from models.lstm_simple import DecoderLSTM_LyftModel, EncoderLSTM
 
 
 
@@ -87,7 +87,7 @@ cfg = {
     },
     "valid_data_loader": {
         'key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/validate.zarr',
-         "batch_size": 1,
+         "batch_size": 32,
          "shuffle": False,
          "num_workers": 0},
     'test_data_loader': {
@@ -171,25 +171,6 @@ def train(device, model, train_dataset, train_dataloader, valid_dataloader, opt=
 VALIDATION = False  # A hyperparameter you could use to toggle for validating the model
 PRETRAINED = False
 
-def collate_fn(data):
-    """
-       data: is a list of tuples with (example, label, length)
-             where 'example' is a tensor of arbitrary shape
-             and label/length are scalars
-    """
-    _, labels, lengths = zip(*data)
-    max_len = max(lengths)
-    n_ftrs = data[0][0].size(1)
-    features = torch.zeros((len(data), max_len, n_ftrs))
-    labels = torch.tensor(labels)
-    lengths = torch.tensor(lengths)
-
-    for i in range(len(data)):
-        j, k = data[i][0].size(0), data[i][0].size(1)
-        features[i] = torch.cat([data[i][0], torch.zeros((max_len - j, k))])
-
-    return features.float(), labels.long(), lengths.long()
-
 
 # %% [code]
 if __name__ == '__main__':
@@ -220,9 +201,32 @@ if __name__ == '__main__':
 
     # ==== TRAIN LOOP
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    model = DecoderLSTM_LyftModel(cfg)
-    optimizer = optim.Adam(model.parameters(), lr=cfg["model_params"]["lr"])
-    model.to(device)
+    hidden_size = 128
+    n_car_states = 7
+    n_agents = 100
+
+    # ==== DEFINING MODEL
+    # Encoders
+    agents_encoder = EncoderLSTM(n_agents*n_car_states, hidden_size, n_frame_history=11, batch_size=32, device=device).to(device)
+    ego_agent_encoder = EncoderLSTM(n_car_states, hidden_size, n_frame_history=11, batch_size=32, device=device).to(device)
+
+    print(agents_encoder)
+    data = next(iter(train_dataloader))
+    batch_size = data["agents_state_vector"].shape[0]
+
+    h_agents = agents_encoder.init_hidden(batch_size)
+    h_ego_agent = ego_agent_encoder.init_hidden(batch_size)
+
+    input_data_agents = data["agents_state_vector"].to(device)
+    input_data_ego_agent = data["ego_agent_state_vector"].to(device)
+
+    encoder_agents_outputs, h_agents = agents_encoder(input_data_agents.float() , h_agents) #to(torch.int64)
+    encoder_ego_agent_outputs, h_ego_agent = ego_agent_encoder(input_data_ego_agent.float() , h_ego_agent) #to(torch.int64)
+
+
+
+    optimizer = optim.Adam(agents_encoder.parameters(), lr=cfg["model_params"]["lr"])
+    agents_encoder.to(device)
 
     if PRETRAINED:
         WEIGHT_FILE = 'MNv2_carstates_4999.pth'
@@ -235,6 +239,17 @@ if __name__ == '__main__':
 
     criterion = pytorch_neg_multi_log_likelihood_batch
 
+
+
+
+
+
+
+
+
+
+
+
     model = train(device, model, train_dataset, train_dataloader, valid_dataloader, optimizer, criterion,
                   lrate=cfg['model_params']['lr'])
 
@@ -242,4 +257,11 @@ if __name__ == '__main__':
     print("Saving the model...")
     torch.save(model.state_dict(), "MNv2_carstates.pth")
     print('model saved')
+
+
+
+    dm = LocalDataManager()
+    dataset_path = dm.require(cfg["sample_data_loader"]["key"])
+    zarr_dataset = ChunkedDataset(dataset_path)
+    zarr_dataset.open()
 
