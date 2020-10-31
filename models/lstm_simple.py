@@ -43,7 +43,8 @@ class raster_encoder(nn.Module):
         backbone = eval(architecture)(pretrained=True, progress=True)
         self.backbone = backbone
 
-        num_history_channels = (cfg["model_params"]["history_num_frames"] + 1) * 2
+        num_hist_frames = (cfg["model_params"]["history_num_frames"] + 1)  #including current frame
+        num_history_channels = (num_hist_frames) * 2
         num_in_channels = 3 + num_history_channels
 
         self.backbone.conv1 = nn.Conv2d(
@@ -106,13 +107,56 @@ class raster_encoder(nn.Module):
 
 
 
+class attention_mechanism(nn.Module):
+    def __init__(self, embed_dim, num_heads, dropout=0.0, bias=True):
+        super(attention_mechanism, self).__init__()
+        self.attention_mechanism = nn.MultiheadAttention(embed_dim, num_heads, dropout, bias)
+
+    def forward(self, Q, K, V):
+        '''query: (L, N, E)(L,N,E) where L is the target sequence length, N is the batch size, E is the embedding dimension.
+        key: (S, N, E)(S,N,E) , where S is the source sequence length, N is the batch size, E is the embedding dimension.
+        value: (S, N, E)(S,N,E) where S is the source sequence length, N is the batch size, E is the embedding dimension.'''
+
+        output = self.attention_mechanism(Q, K, V)
+        return output
+
+class decoder(nn.Module):
+    def __init__(self,  cfg: Dict,  input_size, hidden_size, n_layers=1, drop_prob=0, n_frame_history=11, batch_size=32,
+                 device='cpu',num_modes=3):
+        super(decoder, self).__init__()
+        self.hidden_size = hidden_size
+        self.n_layers = n_layers
+        self.n_frame_history = n_frame_history
+        self._device = device
+        self._batch_size = batch_size
+
+        self.lstm_decoder = nn.LSTM(hidden_size, hidden_size, n_layers, dropout=drop_prob, batch_first=False)
+
+        # X, Y coords for the future positions (output shape: batch_sizex50x2)
+        self.future_len = cfg["model_params"]["future_num_frames"]
+        num_targets = 2 * self.future_len
 
 
+        self.num_preds = num_targets * num_modes
+        self.num_modes = num_modes
+
+        self.logit = nn.Linear(4096, out_features=self.num_preds + num_modes)
 
 
+    def forward(self, inputs, hidden):
+        embedded_input = Variable(torch.zeros(self.n_frame_history, self._batch_size, self.hidden_size)).to(
+            self._device)
+        output = Variable(torch.zeros(self.n_frame_history, self._batch_size, self.hidden_size)).to(self._device)
+        # Embed input agents vector
+        for iframe in range(self.n_frame_history):
+            embedded_input[iframe, :, :] = self.embedding(inputs[:, :, iframe])
+            # Pass the embedded word vectors into LSTM and return all outputs
+        output, hidden = self.lstm_encoder(embedded_input, hidden)
+        return output, hidden
 
-
-
+    def init_hidden(self, batch_size=1):
+        return (torch.zeros(self.n_layers, batch_size, self.hidden_size, device=self._device),
+                torch.zeros(self.n_layers, batch_size, self.hidden_size, device=self._device))
 
 
 
