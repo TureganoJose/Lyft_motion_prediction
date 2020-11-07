@@ -43,7 +43,7 @@ from pathlib import Path
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Subset
-from models.stamina_net import DecoderLSTM_LyftModel, TemporalEncoderLSTM, SpatialEncoderLSTM, raster_encoder, attention_mechanism
+from models.stamina_net import DecoderLSTM_LyftModel, TemporalEncoderLSTM, SpatialEncoderLSTM, raster_encoder, attention_mechanism, MultiHeadAttention
 
 
 
@@ -228,8 +228,10 @@ if __name__ == '__main__':
     encoder_ego_agent_outputs, h_ego_agent = ego_agent_encoder(input_data_ego_agent.float() , h_ego_agent) #to(torch.int64)
 
     # Temporal attention mechanisms
-    temporal_attention = attention_mechanism(embed_dim=128, num_heads=16).to(device)
-    attn_output = temporal_attention(encoder_ego_agent_outputs, encoder_agents_outputs, encoder_agents_outputs)
+    #temporal_attention = attention_mechanism(embed_dim=128, num_heads=16).to(device)
+    temporal_attention = MultiHeadAttention(key_size=128, query_size=128, value_size=128, num_hiddens=128,
+                 num_heads=16, dropout=0.0, bias=False).to(device)
+    attn_output = temporal_attention(encoder_ego_agent_outputs, encoder_agents_outputs, encoder_agents_outputs, valid_len=None)
 
     # Spatial encoder
     spatial_agents_encoder = SpatialEncoderLSTM(n_frames*n_car_states, hidden_size, n_car_states=n_car_states, n_agents=n_agents, n_frame_history=n_frames, batch_size=batch_size, device=device).to(device)
@@ -241,15 +243,14 @@ if __name__ == '__main__':
     Spatial_encoder_agents_outputs, h_Spatial_agents = spatial_agents_encoder(input_data_agents.float(), h_spatial_agents) #to(torch.int64)
     Spatial_encoder_ego_agent_outputs, h_Spatial_ego_agent = spatial_ego_agent_encoder(input_data_ego_agent.float() , h_spatial_ego_agent) #to(torch.int64)
 
-    # Spatial Attention mechanisms
+    # Spatial Attention mechanism
     Spatial_attention = attention_mechanism(embed_dim=128, num_heads=16).to(device)
-    Spatial_attn_output = temporal_attention(Spatial_encoder_ego_agent_outputs, Spatial_encoder_agents_outputs, Spatial_encoder_agents_outputs)
+    Spatial_attn_output = Spatial_attention(Spatial_encoder_ego_agent_outputs, Spatial_encoder_agents_outputs, Spatial_encoder_agents_outputs)
 
+    # Map Attention
     image_encoder = raster_encoder(cfg).to(device)
 
-
-
-
+    # Map Attention mechanism
 
 
     optimizer = optim.Adam(agents_encoder.parameters(), lr=cfg["model_params"]["lr"])

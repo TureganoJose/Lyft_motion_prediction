@@ -6,7 +6,108 @@ from tqdm import tqdm
 from typing import Dict
 from torch import functional as F
 from torch.autograd import Variable
+import math
 
+def sequence_mask(X, valid_len, value=0):
+    """Mask irrelevant entries in sequences."""
+    maxlen = X.size(1)
+    mask = torch.arange((maxlen), dtype=torch.float32,
+                        device=X.device)[None, :] < valid_len[:, None]
+    X[~mask] = value
+    return X
+
+def masked_softmax(X, valid_len):
+    """Perform softmax by filtering out some elements."""
+    # X: 3-D tensor, valid_len: 1-D or 2-D tensor
+    if valid_len is None:
+        return nn.functional.softmax(X, dim=-1)
+    else:
+        shape = X.shape
+        if valid_len.dim() == 1:
+            valid_len = torch.repeat_interleave(valid_len, repeats=shape[1],
+                                                dim=0)
+        else:
+            valid_len = valid_len.reshape(-1)
+        # Fill masked elements with a large negative, whose exp is 0
+        X = sequence_mask(X.reshape(-1, shape[-1]), valid_len, value=-1e6)
+        return nn.functional.softmax(X.reshape(shape), dim=-1)
+
+class DotProductAttention(nn.Module):
+    def __init__(self, dropout, **kwargs):
+        super(DotProductAttention, self).__init__(**kwargs)
+        self.dropout = nn.Dropout(dropout)
+
+    # `query`: (`batch_size`, #queries, `d`)
+    # `key`: (`batch_size`, #kv_pairs, `d`)
+    # `value`: (`batch_size`, #kv_pairs, `dim_v`)
+    # `valid_len`: either (`batch_size`, ) or (`batch_size`, xx)
+    def forward(self, query, key, value, valid_len=None):
+        d = query.shape[-1]
+        # Set transpose_b=True to swap the last two dimensions of key
+        scores = torch.bmm(query, key.transpose(1,2)) / math.sqrt(d)
+        attention_weights = self.dropout(masked_softmax(scores, valid_len))
+        return torch.bmm(attention_weights, value)
+
+def transpose_qkv(X, num_heads):
+    # Input `X` shape: (`batch_size`, `seq_len`, `num_hiddens`).
+    # Output `X` shape:
+    # (`batch_size`, `seq_len`, `num_heads`, `num_hiddens` / `num_heads`)
+    X = X.reshape(X.shape[0], X.shape[1], num_heads, -1)
+
+    # `X` shape:
+    # (`batch_size`, `num_heads`, `seq_len`, `num_hiddens` / `num_heads`)
+    X = X.permute(0, 2, 1, 3)
+
+    # `output` shape:
+    # (`batch_size` * `num_heads`, `seq_len`, `num_hiddens` / `num_heads`)
+    output = X.reshape(-1, X.shape[2], X.shape[3])
+    return output
+
+
+#@save
+def transpose_output(X, num_heads):
+    # A reversed version of `transpose_qkv`
+    X = X.reshape(-1, num_heads, X.shape[1], X.shape[2])
+    X = X.permute(0, 2, 1, 3)
+    return X.reshape(X.shape[0], X.shape[1], -1)
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, key_size, query_size, value_size, num_hiddens,
+                 num_heads, dropout, bias=False, **kwargs):
+        super(MultiHeadAttention, self).__init__(**kwargs)
+        self.num_heads = num_heads
+        self.attention = DotProductAttention(dropout)
+        self.W_q = nn.Linear(query_size, num_hiddens, bias=bias)
+        self.W_k = nn.Linear(key_size, num_hiddens, bias=bias)
+        self.W_v = nn.Linear(value_size, num_hiddens, bias=bias)
+        self.W_o = nn.Linear(num_hiddens, num_hiddens, bias=bias)
+
+    def forward(self, query, key, value, valid_len):
+        # For self-attention, `query`, `key`, and `value` shape:
+        # (`batch_size`, `seq_len`, `dim`), where `seq_len` is the length of
+        # input sequence. `valid_len` shape is either (`batch_size`, ) or
+        # (`batch_size`, `seq_len`).
+
+        # Project and transpose `query`, `key`, and `value` from
+        # (`batch_size`, `seq_len`, `num_hiddens`) to
+        # (`batch_size` * `num_heads`, `seq_len`, `num_hiddens` / `num_heads`)
+        query = transpose_qkv(self.W_q(query), self.num_heads)
+        key = transpose_qkv(self.W_k(key), self.num_heads)
+        value = transpose_qkv(self.W_v(value), self.num_heads)
+
+        if valid_len is not None:
+            if valid_len.ndim == 1:
+              valid_len = valid_len.repeat(self.num_heads)
+            else:
+              valid_len = valid_len.repeat(self.num_heads, 1)
+
+        # For self-attention, `output` shape:
+        # (`batch_size` * `num_heads`, `seq_len`, `num_hiddens` / `num_heads`)
+        output = self.attention(query, key, value, valid_len)
+
+        # `output_concat` shape: (`batch_size`, `seq_len`, `num_hiddens`)
+        output_concat = transpose_output(output, self.num_heads)
+        return self.W_o(output_concat)
 
 ''' STAMinA Spacial-Temmporal Attention with Map indexing of near Agents '''
 
