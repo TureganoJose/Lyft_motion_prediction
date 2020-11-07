@@ -7,9 +7,12 @@ from typing import Dict
 from torch import functional as F
 from torch.autograd import Variable
 
-class EncoderLSTM(nn.Module):
+
+''' STAMinA Spacial-Temmporal Attention with Map indexing of near Agents '''
+
+class TemporalEncoderLSTM(nn.Module):
   def __init__(self, input_size, hidden_size, n_layers=1, drop_prob=0, n_frame_history=11, batch_size=32, device='cpu'):
-    super(EncoderLSTM, self).__init__()
+    super(TemporalEncoderLSTM, self).__init__()
     self.hidden_size = hidden_size
     self.n_layers = n_layers
     self.n_frame_history = n_frame_history
@@ -33,7 +36,33 @@ class EncoderLSTM(nn.Module):
     return (torch.zeros(self.n_layers, batch_size, self.hidden_size, device=self._device),
             torch.zeros(self.n_layers, batch_size, self.hidden_size, device=self._device))
 
+class SpatialEncoderLSTM(nn.Module):
+  def __init__(self, input_size, hidden_size, n_layers=1, drop_prob=0, n_car_states=7, n_agents=100, n_frame_history=11, batch_size=32, device='cpu'):
+    super(SpatialEncoderLSTM, self).__init__()
+    self.hidden_size = hidden_size
+    self.n_layers = n_layers
+    self.n_car_states = n_car_states
+    self.n_agents = n_agents
+    self.n_frame_history = n_frame_history
+    self._device = device
+    self._batch_size = batch_size
 
+    self.embedding = nn.Linear(input_size, hidden_size)
+    self.lstm_encoder = nn.LSTM(hidden_size, hidden_size, n_layers, dropout=drop_prob, batch_first=False)
+
+  def forward(self, inputs, hidden):
+    embedded_input = Variable(torch.zeros(self.n_agents, self._batch_size, self.hidden_size)).to(self._device)
+    output = Variable(torch.zeros(self.n_agents, self._batch_size, self.hidden_size)).to(self._device)
+    # Embed input agents vector
+    for iagent in range(self.n_agents):
+        embedded_input[iagent, :, :] = self.embedding(torch.reshape(inputs[:, self.n_car_states*(iagent):self.n_car_states*(iagent)+7, :], (self._batch_size, self.n_car_states*self.n_frame_history)))
+        # Pass the embedded word vectors into LSTM and return all outputs
+    output, hidden = self.lstm_encoder(embedded_input, hidden)
+    return output, hidden
+
+  def init_hidden(self, batch_size=1):
+    return (torch.zeros(self.n_layers, batch_size, self.hidden_size, device=self._device),
+            torch.zeros(self.n_layers, batch_size, self.hidden_size, device=self._device))
 
 class raster_encoder(nn.Module):
     def __init__(self, cfg: Dict, num_modes=3):
