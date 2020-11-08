@@ -43,7 +43,7 @@ from pathlib import Path
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Subset
-from models.stamina_net import DecoderLSTM_LyftModel, TemporalEncoderLSTM, SpatialEncoderLSTM, raster_encoder, attention_mechanism, MultiHeadAttention
+from models.stamina_net import DecoderLSTM_LyftModel, TemporalEncoderLSTM, SpatialEncoderLSTM, raster_encoder, attention_mechanism, MultiHeadAttention, decoder
 
 
 
@@ -228,10 +228,10 @@ if __name__ == '__main__':
     encoder_ego_agent_outputs, h_ego_agent = ego_agent_encoder(input_data_ego_agent.float() , h_ego_agent) #to(torch.int64)
 
     # Temporal attention mechanisms
-    #temporal_attention = attention_mechanism(embed_dim=128, num_heads=16).to(device)
-    temporal_attention = MultiHeadAttention(key_size=128, query_size=128, value_size=128, num_hiddens=128,
-                 num_heads=16, dropout=0.0, bias=False).to(device)
-    attn_output = temporal_attention(encoder_ego_agent_outputs, encoder_agents_outputs, encoder_agents_outputs, valid_len=None)
+    temporal_attention = attention_mechanism(embed_dim=128, num_heads=16).to(device)
+    #temporal_attention = MultiHeadAttention(key_size=128, query_size=128, value_size=128, num_hiddens=128,
+    #             num_heads=16, dropout=0.0, bias=False, valid_len=None).to(device)
+    attn_output = temporal_attention(encoder_ego_agent_outputs, encoder_agents_outputs, encoder_agents_outputs)
 
     # Spatial encoder
     spatial_agents_encoder = SpatialEncoderLSTM(n_frames*n_car_states, hidden_size, n_car_states=n_car_states, n_agents=n_agents, n_frame_history=n_frames, batch_size=batch_size, device=device).to(device)
@@ -247,11 +247,33 @@ if __name__ == '__main__':
     Spatial_attention = attention_mechanism(embed_dim=128, num_heads=16).to(device)
     Spatial_attn_output = Spatial_attention(Spatial_encoder_ego_agent_outputs, Spatial_encoder_agents_outputs, Spatial_encoder_agents_outputs)
 
-    # Map Attention
+    # Map Encoder
     image_encoder = raster_encoder(cfg).to(device)
+    image_features = image_encoder(input_image)
+    image_features = image_features.unsqueeze(0)
+    image_features = image_features.permute(2, 1, 0)
 
     # Map Attention mechanism
+    map_attention = attention_mechanism(embed_dim=128, num_heads=16, k_dim=1, v_dim=1).to(device)
+    map_attn_output = map_attention(Spatial_encoder_ego_agent_outputs, image_features, image_features)
 
+    # Concat all three: spatial, temporal and map
+    concat_temporal_tensor = torch.cat((attn_output[0], encoder_ego_agent_outputs), dim=2)
+    concat_spatial_tensor = torch.cat((Spatial_attn_output[0], Spatial_encoder_ego_agent_outputs), dim=2)
+    concat_map_tensor = torch.cat((map_attn_output[0], Spatial_encoder_ego_agent_outputs), dim=2)
+
+    # Temporal concat
+    total_concat_size = concat_temporal_tensor.shape[2] + concat_spatial_tensor.shape[2] + concat_map_tensor.shape[2]
+    final_encoded_tensor = torch.zeros((n_frames, batch_size, total_concat_size))
+    for iframe in range(n_frames):
+        final_encoded_tensor[iframe, :, :] = torch.cat((concat_temporal_tensor[iframe, :, :].unsqueeze(0),
+                                                        concat_spatial_tensor, concat_map_tensor), dim=2)
+
+    # Decoder
+    final_layer = decoder( cfg,  input_size = total_concat_size, hidden_size= 128, n_layers=1, drop_prob=0, n_frame_history=n_frames,
+                          batch_size=batch_size,device='cpu',num_modes=3)
+    h_final = final_layer.init_hidden(batch_size)
+    predictions, probabilities = final_layer(final_encoded_tensor, h_final)
 
     optimizer = optim.Adam(agents_encoder.parameters(), lr=cfg["model_params"]["lr"])
     agents_encoder.to(device)

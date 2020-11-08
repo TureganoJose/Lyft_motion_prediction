@@ -223,24 +223,16 @@ class raster_encoder(nn.Module):
         x = torch.flatten(x, 1)
 
         x = self.head(x)
-        #x = self.logit(x)
 
-        ## pred (batch_size)x(modes)x(time)x(2D coords)
-        ## confidences (batch_size)x(modes)
-        #bs, _ = x.shape
-        #pred, confidences = torch.split(x, self.num_preds, dim=1)
-        #pred = pred.view(bs, self.num_modes, self.future_len, 2)
-        #assert confidences.shape == (bs, self.num_modes)
-        #confidences = torch.softmax(confidences, dim=1)
         return x
 
 
 
 
 class attention_mechanism(nn.Module):
-    def __init__(self, embed_dim, num_heads, dropout=0.0, bias=True):
+    def __init__(self, embed_dim, num_heads, dropout=0.0, bias=True, k_dim=None, v_dim=None):
         super(attention_mechanism, self).__init__()
-        self.attention_mechanism = nn.MultiheadAttention(embed_dim, num_heads, dropout, bias)
+        self.attention_mechanism = nn.MultiheadAttention(embed_dim, num_heads, dropout, bias, kdim=k_dim, vdim=v_dim)
 
     def forward(self, Q, K, V):
         '''query: (L, N, E)(L,N,E) where L is the target sequence length, N is the batch size, E is the embedding dimension.
@@ -260,29 +252,33 @@ class decoder(nn.Module):
         self._device = device
         self._batch_size = batch_size
 
-        self.lstm_decoder = nn.LSTM(hidden_size, hidden_size, n_layers, dropout=drop_prob, batch_first=False)
+        self.lstm_decoder = nn.LSTM(input_size, hidden_size, n_layers, dropout=drop_prob, batch_first=False)
 
         # X, Y coords for the future positions (output shape: batch_sizex50x2)
         self.future_len = cfg["model_params"]["future_num_frames"]
         num_targets = 2 * self.future_len
 
-
         self.num_preds = num_targets * num_modes
         self.num_modes = num_modes
 
-        self.logit = nn.Linear(4096, out_features=self.num_preds + num_modes)
+        self.logit = nn.Linear(hidden_size, out_features=self.num_preds + num_modes)
 
 
     def forward(self, inputs, hidden):
-        embedded_input = Variable(torch.zeros(self.n_frame_history, self._batch_size, self.hidden_size)).to(
-            self._device)
-        output = Variable(torch.zeros(self.n_frame_history, self._batch_size, self.hidden_size)).to(self._device)
-        # Embed input agents vector
-        for iframe in range(self.n_frame_history):
-            embedded_input[iframe, :, :] = self.embedding(inputs[:, :, iframe])
-            # Pass the embedded word vectors into LSTM and return all outputs
-        output, hidden = self.lstm_encoder(embedded_input, hidden)
-        return output, hidden
+        decoder_lstm_output = Variable(torch.zeros(self.n_frame_history, self._batch_size, self.hidden_size)).to(self._device)
+        decoder_lstm_output, hidden = self.lstm_decoder(inputs, hidden)
+        decoder_lstm_output = decoder_lstm_output.permute(1, 0, 2)
+        decoder_lstm_output = torch.flatten(decoder_lstm_output, 1)
+        x = self.logit(decoder_lstm_output)
+
+        ## pred (batch_size)x(modes)x(time)x(2D coords)
+        ## confidences (batch_size)x(modes)
+        bs, _ = x.shape
+        pred, confidences = torch.split(x, self.num_preds, dim=1)
+        pred = pred.view(bs, self.num_modes, self.future_len, 2)
+        assert confidences.shape == (bs, self.num_modes)
+        confidences = torch.softmax(confidences, dim=1)
+        return pred, confidences
 
     def init_hidden(self, batch_size=1):
         return (torch.zeros(self.n_layers, batch_size, self.hidden_size, device=self._device),
