@@ -207,6 +207,23 @@ if __name__ == '__main__':
     n_frames = 11
     batch_size = 32
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     # ==== DEFINING MODEL
     # Encoders
     agents_encoder = TemporalEncoderLSTM(n_agents*n_car_states, hidden_size, n_frame_history=n_frames, batch_size=32, device=device).to(device)
