@@ -109,7 +109,7 @@ class MultiHeadAttention(nn.Module):
         output_concat = transpose_output(output, self.num_heads)
         return self.W_o(output_concat)
 
-''' STAMinA Spacial-Temmporal Attention with Map indexing of near Agents '''
+
 
 class TemporalEncoderLSTM(nn.Module):
   def __init__(self, input_size, hidden_size, n_layers=1, drop_prob=0, n_frame_history=11, batch_size=32, device='cpu'):
@@ -227,8 +227,6 @@ class raster_encoder(nn.Module):
         return x
 
 
-
-
 class attention_mechanism(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout=0.0, bias=True, k_dim=None, v_dim=None):
         super(attention_mechanism, self).__init__()
@@ -261,7 +259,7 @@ class decoder(nn.Module):
         self.num_preds = num_targets * num_modes
         self.num_modes = num_modes
 
-        self.logit = nn.Linear(hidden_size, out_features=self.num_preds + num_modes)
+        self.logit = nn.Linear(n_frame_history*hidden_size, out_features=self.num_preds + num_modes)
 
 
     def forward(self, inputs, hidden):
@@ -285,58 +283,112 @@ class decoder(nn.Module):
                 torch.zeros(self.n_layers, batch_size, self.hidden_size, device=self._device))
 
 
+''' STAMinA Spacial-Temmporal Attention with Map indexing of near Agents '''
+class STAMINA_net(nn.Module):
+    def __init__(self, cfg: Dict, n_agents=100, n_car_states=7, n_frames=11, batch_size=32, device='cpu',
+                 spatial_en_hid_size=128, temp_en_hid_size=128,
+                 temp_att_embed_dim=128, temp_n_heads=16, spatial_att_embed_dim=128, spatial_n_heads=16,
+                 map_att_embed_dim=128, map_n_heads=16, map_k_dim=1, map_v_dim=1):
+        """ This is my first net, STAMINA, Spatial-Temporal Attention with Maps Indexing Near Agents.
+        The name is a stretch, I know, it's pretty much random and based on my personal intuition of what it might work,
+        it's got 3 main branches: spacial, temporal and maps. First two branches have 2 encoders, one for all the agents
+        and one for the reference vehicle (called ego agent here). The third map uses the map features in conjunction
+         with the encoded ego agent states. Each of the branches have a multi-head attention module """
+        # General parameters
+        self.n_agents = n_agents
+        self.n_car_states = n_car_states
+        self.n_frames = n_frames
+        self.device = device,
+        self.batch_size = batch_size
 
-class EncoderLSTM_LyftModel(nn.Module):
+        # Spatial encoder parameters
+        self.spatial_en_hid_size = spatial_en_hid_size
+        # Temporal encoder parameters
+        self.temp_en_hid_size = temp_en_hid_size
 
-    def __init__(self, cfg):
-        super(EncoderLSTM_LyftModel, self).__init__()
+        self.total_concat_size = 3 * spatial_en_hid_size + 3 * temp_en_hid_size
+        # ==== DEFINING MODEL
+        # Temporal Encoders
+        self.agents_encoder = TemporalEncoderLSTM(n_agents * n_car_states, temp_en_hid_size, n_frame_history=n_frames,
+                                                  batch_size=batch_size, device=device)
+        self.ego_agent_encoder = TemporalEncoderLSTM(n_car_states, temp_en_hid_size, n_frame_history=n_frames,
+                                                     batch_size=batch_size, device=device)
 
-        self.input_sz = 2
-        self.hidden_sz = 128
-        self.num_layer = 1
-        self.sequence_length = 11
+        # Temporal attention mechanisms
+        self.temporal_attention = attention_mechanism(embed_dim=temp_att_embed_dim, num_heads=temp_n_heads)
+        # temporal_attention = MultiHeadAttention(key_size=128, query_size=128, value_size=128, num_hiddens=128,
+        #             num_heads=16, dropout=0.0, bias=False, valid_len=None).to(device)
+
+        # Spatial encoder
+        self.spatial_agents_encoder = SpatialEncoderLSTM(n_frames * n_car_states, spatial_en_hid_size, n_car_states=n_car_states,
+                                                         n_agents=n_agents, n_frame_history=n_frames, batch_size=batch_size,
+                                                         device=device)
+        self.spatial_ego_agent_encoder = SpatialEncoderLSTM(n_frames * n_car_states, spatial_en_hid_size, n_car_states=n_car_states,
+                                                            n_agents=1, n_frame_history=n_frames, batch_size=batch_size,
+                                                            device=device)
+
+        # Spatial Attention mechanism
+        self.Spatial_attention = attention_mechanism(embed_dim=spatial_att_embed_dim, num_heads=spatial_n_heads)
+
+        # Map Encoder
+        self.image_encoder = raster_encoder(cfg)
+
+        # Map Attention mechanism
+        self.map_attention = attention_mechanism(embed_dim=map_att_embed_dim, num_heads=map_n_heads, k_dim=map_k_dim, v_dim=map_v_dim)
+
+        # Decoder
+        self.final_layer = decoder(cfg, input_size=self.total_concat_size, hidden_size=128, n_layers=1, drop_prob=0,
+                                   n_frame_history=n_frames,
+                                   batch_size=batch_size, device=device, num_modes=3)
 
 
-        self.embedding_input = nn.Linear(self.input_sz, self.hidden_sz)
-        self.Encoder_lstm = nn.LSTM(self.input_sz, self.hidden_sz, self.num_layer, batch_first=True)
 
-    def forward(self, inputs):
-        output, hidden_state = self.Encoder_lstm(inputs)
+    def forward(self, input_data):
 
-        return output, hidden_state
+        # Input data
+        input_data_agents = input_data["agents_state_vector"].to(self.device)
+        input_data_ego_agent = input_data["ego_agent_state_vector"].to(self.device)
+        input_image = input_data["image"].to(self.device)
 
+        # Temporal encoding
+        h_agents = self.agents_encoder.init_hidden(self.batch_size)
+        h_ego_agent = self.ego_agent_encoder.init_hidden(self.batch_size)
+        encoder_agents_outputs, h_agents = self.agents_encoder(input_data_agents.float(), h_agents)  # to(torch.int64)
+        encoder_ego_agent_outputs, h_ego_agent = self.ego_agent_encoder(input_data_ego_agent.float(),
+                                                                   h_ego_agent)  # to(torch.int64)
 
-class DecoderLSTM_LyftModel(nn.Module):
-    def __init__(self, cfg):
-        super(DecoderLSTM_LyftModel, self).__init__()
+        attn_output = self.temporal_attention(encoder_ego_agent_outputs, encoder_agents_outputs, encoder_agents_outputs)
 
-        self.input_sz = 128  # (2000 from fcn_en_output reshape to 50*40)
-        self.hidden_sz = 128
-        self.hidden_sz_en = 128
-        self.num_layer = 1
-        self.sequence_len_de = 1
+        # Spacial encoding
+        h_spatial_agents = self.spatial_agents_encoder.init_hidden(self.batch_size)
+        h_spatial_ego_agent = self.spatial_ego_agent_encoder.init_hidden(self.batch_size)
+        Spatial_encoder_agents_outputs, h_spatial_agents = self.spatial_agents_encoder(input_data_agents.float(),
+                                                                                       h_spatial_agents)  # to(torch.int64)
+        Spatial_encoder_ego_agent_outputs, h_spatial_ego_agent = self.spatial_ego_agent_encoder(input_data_ego_agent.float(),
+                                                                                                h_spatial_ego_agent)  # to(torch.int64)
 
-        self.interlayer = 256
+        Spatial_attn_output = self.Spatial_attention(Spatial_encoder_ego_agent_outputs, Spatial_encoder_agents_outputs,
+                                                     Spatial_encoder_agents_outputs)
 
-        num_targets = 2 * cfg["model_params"]["future_num_frames"]
+        # Encoding map
+        image_features = self.image_encoder(input_image)
+        image_features = image_features.unsqueeze(0)
+        image_features = image_features.permute(2, 1, 0)
 
-        self.encoderLSTM = EncoderLSTM_LyftModel(cfg)
+        map_attn_output = self.map_attention(Spatial_encoder_ego_agent_outputs, image_features, image_features)
 
-        self.Decoder_lstm = nn.LSTM(self.input_sz, self.hidden_sz, self.num_layer, batch_first=True)
+        # Concat all three: spatial, temporal and map
+        concat_temporal_tensor = torch.cat((attn_output[0], encoder_ego_agent_outputs), dim=2)
+        concat_spatial_tensor = torch.cat((Spatial_attn_output[0], Spatial_encoder_ego_agent_outputs), dim=2)
+        concat_map_tensor = torch.cat((map_attn_output[0], Spatial_encoder_ego_agent_outputs), dim=2)
 
-        self.fcn_en_state_dec_state = nn.Sequential(
-            nn.Linear(in_features=self.hidden_sz_en, out_features=self.interlayer),
-            nn.ReLU(inplace=True),
-            nn.Linear(in_features=self.interlayer, out_features=num_targets))
+        # Temporal concat
+        final_encoded_tensor = torch.zeros((self.n_frames, self.batch_size, self.total_concat_size))
+        for iframe in range(self.n_frames):
+            final_encoded_tensor[iframe, :, :] = torch.cat((concat_temporal_tensor[iframe, :, :].unsqueeze(0),
+                                                            concat_spatial_tensor, concat_map_tensor), dim=2)
 
-    def forward(self, inputs):
-        _, hidden_state = self.encoderLSTM(inputs)
+        h_final = self.final_layer.init_hidden(self.batch_size)
+        predictions, probabilities = self.final_layer(final_encoded_tensor, h_final)
 
-        inout_to_dec = torch.ones(inputs.shape[0], self.sequence_len_de, self.input_sz).to(device)
-
-        # for i in range(cfg["model_params"]["future_num_frames"]+1): # this can be used to feed output from previous LSTM to anther one which is stacked.
-        inout_to_dec, hidden_state = self.Decoder_lstm(inout_to_dec, (hidden_state[0], hidden_state[1]))
-
-        fc_out = self.fcn_en_state_dec_state(inout_to_dec.squeeze(dim=0))
-
-        return fc_out.reshape(inputs.shape[0], cfg["model_params"]["future_num_frames"], -1)
+        return predictions, probabilities
