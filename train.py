@@ -43,7 +43,8 @@ from pathlib import Path
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Subset
-from models.stamina_net import DecoderLSTM_LyftModel, TemporalEncoderLSTM, SpatialEncoderLSTM, raster_encoder, attention_mechanism, MultiHeadAttention, decoder
+from models.stamina_net import TemporalEncoderLSTM, SpatialEncoderLSTM, raster_encoder
+from models.stamina_net import STAMINA_net, attention_mechanism, MultiHeadAttention, decoder
 
 
 
@@ -109,10 +110,9 @@ cfg = {
 }
 
 
-def train(device, model, train_dataset, train_dataloader, valid_dataloader, opt=None, criterion=None, lrate=1e-4):
+def train(device, model, train_dataloader, valid_dataloader, opt=None, criterion=None):
     """Function for training the model"""
     print("Training...")
-    losses = []
     progress = tqdm(range(cfg["train_params"]["max_num_steps"]))
     train_iter = iter(train_dataloader)
     val_iter = []  # iter(valid_dataloader)
@@ -124,20 +124,14 @@ def train(device, model, train_dataset, train_dataloader, valid_dataloader, opt=
             train_iter = iter(train_dataloader)
             data = next(train_iter)
 
+        target_availabilities = data["target_availabilities"].unsqueeze(-1).to(device)
+        targets = data["target_positions"].to(device)
         model.train()
         torch.set_grad_enabled(True)
 
-
         # Forward pass
-        history_positions = data['history_positions'].to(device)
-        all_history_positions = data['history_all_agents_positions'].to(device)
-        target_availabilities = data["target_availabilities"].to(device)
-        targets, confidences = data["target_positions"].to(device)
-        lengths = data["num_agents"].to(device)
-
-        inputs = torch.nn.utils.rnn.pack_padded_sequence(history_positions, lengths, batch_first=True)
-        outputs = model(history_positions)
-        loss = criterion(targets, outputs, confidences, target_availabilities)
+        outputs, confidences = stamina(data)
+        loss = criterion(targets, outputs, confidences, target_availabilities.squeeze(-1))
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -150,9 +144,8 @@ def train(device, model, train_dataset, train_dataloader, valid_dataloader, opt=
                 except StopIteration:
                     val_iter = iter(valid_dataloader)
                     val_data = next(val_iter)
-
-
-                # val_loss, _ = forward(val_data, model, device, criterion)
+                val_outputs, val_confidences = stamina(data)
+                val_loss = criterion(targets, val_outputs, val_confidences, target_availabilities)
             desc = f"Loss: {round(loss.item(), 4)} Validation Loss: {round(val_loss.item(), 4)}"
         else:
             desc = f"Loss: {round(loss.item(), 4)}"
@@ -200,28 +193,43 @@ if __name__ == '__main__':
         valid_dataloader = []
 
     # ==== TRAIN LOOP
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = 'cpu' #torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+    stamina = STAMINA_net(cfg,
+                          n_agents=100,
+                          n_car_states=7,
+                          n_frames=11,
+                          batch_size=32,
+                          device=device,
+                          spatial_en_hid_size=128,
+                          temp_en_hid_size=128,
+                          temp_att_embed_dim=128,
+                          temp_n_heads=16,
+                          spatial_att_embed_dim=128,
+                          spatial_n_heads=16,
+                          map_att_embed_dim=128,
+                          map_n_heads=16,
+                          map_k_dim=1,
+                          map_v_dim=1)
+
+    stamina.to(device)
+    optimizer = optim.Adam(stamina.parameters(), lr=cfg["model_params"]["lr"])
+
+    train_accuracy, val_accuracy, losses, val_losses, model = train(device=device,
+                                                                    model=stamina,
+                                                                    train_dataloader=train_dataloader,
+                                                                    valid_dataloader=valid_dataloader,
+                                                                    opt=optimizer,
+                                                                    criterion=pytorch_neg_multi_log_likelihood_batch)
+
+
+
+
     hidden_size = 128
     n_car_states = 7
     n_agents = 100
     n_frames = 11
     batch_size = 32
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
     # ==== DEFINING MODEL

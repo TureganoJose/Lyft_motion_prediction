@@ -283,22 +283,25 @@ class decoder(nn.Module):
                 torch.zeros(self.n_layers, batch_size, self.hidden_size, device=self._device))
 
 
-''' STAMinA Spacial-Temmporal Attention with Map indexing of near Agents '''
+
 class STAMINA_net(nn.Module):
     def __init__(self, cfg: Dict, n_agents=100, n_car_states=7, n_frames=11, batch_size=32, device='cpu',
                  spatial_en_hid_size=128, temp_en_hid_size=128,
                  temp_att_embed_dim=128, temp_n_heads=16, spatial_att_embed_dim=128, spatial_n_heads=16,
                  map_att_embed_dim=128, map_n_heads=16, map_k_dim=1, map_v_dim=1):
+        ''' STAMinA Spacial-Temmporal Attention with Map indexing of near Agents '''
         """ This is my first net, STAMINA, Spatial-Temporal Attention with Maps Indexing Near Agents.
         The name is a stretch, I know, it's pretty much random and based on my personal intuition of what it might work,
         it's got 3 main branches: spacial, temporal and maps. First two branches have 2 encoders, one for all the agents
         and one for the reference vehicle (called ego agent here). The third map uses the map features in conjunction
          with the encoded ego agent states. Each of the branches have a multi-head attention module """
+
+        super(STAMINA_net, self).__init__()
         # General parameters
         self.n_agents = n_agents
         self.n_car_states = n_car_states
         self.n_frames = n_frames
-        self.device = device,
+        self.device = device
         self.batch_size = batch_size
 
         # Spatial encoder parameters
@@ -309,8 +312,7 @@ class STAMINA_net(nn.Module):
         self.total_concat_size = 3 * spatial_en_hid_size + 3 * temp_en_hid_size
         # ==== DEFINING MODEL
         # Temporal Encoders
-        self.agents_encoder = TemporalEncoderLSTM(n_agents * n_car_states, temp_en_hid_size, n_frame_history=n_frames,
-                                                  batch_size=batch_size, device=device)
+        self.agents_encoder = TemporalEncoderLSTM(n_agents * n_car_states, temp_en_hid_size, n_frame_history=n_frames, batch_size=self.batch_size, device=self.device)
         self.ego_agent_encoder = TemporalEncoderLSTM(n_car_states, temp_en_hid_size, n_frame_history=n_frames,
                                                      batch_size=batch_size, device=device)
 
@@ -389,6 +391,6 @@ class STAMINA_net(nn.Module):
                                                             concat_spatial_tensor, concat_map_tensor), dim=2)
 
         h_final = self.final_layer.init_hidden(self.batch_size)
-        predictions, probabilities = self.final_layer(final_encoded_tensor, h_final)
+        predictions, probabilities = self.final_layer(final_encoded_tensor.to(self.device), h_final)
 
         return predictions, probabilities

@@ -170,7 +170,10 @@ to train models that can recover from slight divergence from training set data
     sorted_agents_state_vector = sorted_agents_state_vector.reshape((num_agents*7, history_num_frames + 1))
 
     padded_agents_state_vector = np.zeros((100*7, history_num_frames + 1))
-    padded_agents_state_vector[:sorted_agents_state_vector.shape[0], :sorted_agents_state_vector.shape[1]]=sorted_agents_state_vector
+    if(sorted_agents_state_vector.shape[0]<100*7):
+        padded_agents_state_vector[:sorted_agents_state_vector.shape[0], :sorted_agents_state_vector.shape[1]]=sorted_agents_state_vector
+    else:
+        padded_agents_state_vector[:700, :sorted_agents_state_vector.shape[1]] = sorted_agents_state_vector[:700, :]
 
     # full state vector of reference/ego agent
     agent_coords_offset, agent_yaws_offset, agent_availability, agent_velocity, agent_distance, ego_agent_state_vector = _custom_create_targets_for_lstm_encoding(
