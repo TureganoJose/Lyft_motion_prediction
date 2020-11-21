@@ -41,10 +41,13 @@ from typing import Dict
 from pathlib import Path
 
 from torch import nn, optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 from torch.utils.data.dataset import Subset
 from models.stamina_net import TemporalEncoderLSTM, SpatialEncoderLSTM, raster_encoder
 from models.stamina_net import STAMINA_net, attention_mechanism, MultiHeadAttention, decoder
+from models.stamina_res_net import STAMINA_res_net
+
+import pickle
 
 
 
@@ -76,14 +79,14 @@ cfg = {
     'train_data_loader': {
         'key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/train.zarr',
         'batch_size': 32,
-        'shuffle': True,
+        'shuffle': False,
         'num_workers': 0
     },
 
     'sample_data_loader': {
         'key': 'C:\Workspaces\L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/sample.zarr',
-        'batch_size': 32,
-        'shuffle': True,
+        'batch_size': 1,
+        'shuffle': False,
         'num_workers': 0
     },
     "valid_data_loader": {
@@ -108,6 +111,22 @@ cfg = {
 
     }
 }
+
+class IndexSampler(Sampler):
+    def __init__(self, index, is_shuffle=False):
+        #self.dataset = dataset
+        self.index = index
+        self.is_shuffle = is_shuffle
+        self.len = len(index)
+
+    def __iter__(self):
+        index = self.index.copy()
+        if self.is_shuffle:
+            random.shuffle(index)
+        return iter(index)
+
+    def __len__(self):
+        return self.len
 
 
 def train(device, model, train_dataloader, valid_dataloader, opt=None, criterion=None):
@@ -155,18 +174,29 @@ def train(device, model, train_dataloader, valid_dataloader, opt=None, criterion
             torch.save({'epoch': i + 1,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict()},
-                       f'MNv2_carstates_{i}.pth')
+                       f'stamina_{i+0}.pth')
         progress.set_description(desc)
 
     return model
 
 
 VALIDATION = False  # A hyperparameter you could use to toggle for validating the model
-PRETRAINED = False
-
+PRETRAINED = True
+last_used = 56500
 
 # %% [code]
 if __name__ == '__main__':
+
+    index_scenes = []
+    if not PRETRAINED:
+        index_scenes = np.arange(3000) #531365
+        np.random.shuffle(index_scenes)
+        with open('index_scenes.pkl', 'wb') as f:  # Python 3: open(..., 'wb')
+            pickle.dump(index_scenes, f)
+    else:
+        with open('index_scenes.pkl', 'rb') as f:  # Python 3: open(..., 'rb')
+            index_scenes = pickle.load(f)
+
     # ===== LOAD TRAINING DATASET
     dm = LocalDataManager(None)
     train_cfg = cfg["sample_data_loader"]
@@ -174,8 +204,8 @@ if __name__ == '__main__':
     train_zarr = ChunkedDataset(dm.require(train_cfg["key"])).open()
     train_dataset = CustomAgentDataset(cfg, train_zarr, rasterizer)
     # train_sub_dataset = torch.utils.data.Subset(train_dataset, range(100))
-    train_dataloader = DataLoader(train_dataset, shuffle=train_cfg["shuffle"], batch_size=train_cfg["batch_size"],
-                                  num_workers=train_cfg["num_workers"])
+    train_dataloader = DataLoader(train_dataset, shuffle=train_cfg["shuffle"], sampler=IndexSampler(index_scenes[last_used:]),
+                                  batch_size=train_cfg["batch_size"], num_workers=train_cfg["num_workers"])
     print("==================================TRAIN DATA==================================")
     print(train_dataset)
 
@@ -195,11 +225,11 @@ if __name__ == '__main__':
     # ==== TRAIN LOOP
     device = 'cpu' #torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-    stamina = STAMINA_net(cfg,
+    stamina = STAMINA_res_net(cfg,
                           n_agents=100,
                           n_car_states=7,
                           n_frames=11,
-                          batch_size=32,
+                          batch_size=1,
                           device=device,
                           spatial_en_hid_size=128,
                           temp_en_hid_size=128,
@@ -211,9 +241,17 @@ if __name__ == '__main__':
                           map_n_heads=16,
                           map_k_dim=1,
                           map_v_dim=1)
-
     stamina.to(device)
+
     optimizer = optim.Adam(stamina.parameters(), lr=cfg["model_params"]["lr"])
+
+    if PRETRAINED:
+        WEIGHT_FILE = 'stamina_res_56499.pth'
+        checkpoint = torch.load(WEIGHT_FILE, map_location=device)
+        epoch = checkpoint['epoch']
+        stamina.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
 
     train_accuracy, val_accuracy, losses, val_losses, model = train(device=device,
                                                                     model=stamina,
@@ -222,121 +260,8 @@ if __name__ == '__main__':
                                                                     opt=optimizer,
                                                                     criterion=pytorch_neg_multi_log_likelihood_batch)
 
-
-
-
-    hidden_size = 128
-    n_car_states = 7
-    n_agents = 100
-    n_frames = 11
-    batch_size = 32
-
-
-    # ==== DEFINING MODEL
-    # Encoders
-    agents_encoder = TemporalEncoderLSTM(n_agents*n_car_states, hidden_size, n_frame_history=n_frames, batch_size=32, device=device).to(device)
-    ego_agent_encoder = TemporalEncoderLSTM(n_car_states, hidden_size, n_frame_history=n_frames, batch_size=32, device=device).to(device)
-
-
-    print(agents_encoder)
-    data = next(iter(train_dataloader))
-    batch_size = data["agents_state_vector"].shape[0]
-
-    h_agents = agents_encoder.init_hidden(batch_size)
-    h_ego_agent = ego_agent_encoder.init_hidden(batch_size)
-
-    input_data_agents = data["agents_state_vector"].to(device)
-    input_data_ego_agent = data["ego_agent_state_vector"].to(device)
-    input_image = data["image"].to(device)
-
-    encoder_agents_outputs, h_agents = agents_encoder(input_data_agents.float(), h_agents) #to(torch.int64)
-    encoder_ego_agent_outputs, h_ego_agent = ego_agent_encoder(input_data_ego_agent.float() , h_ego_agent) #to(torch.int64)
-
-    # Temporal attention mechanisms
-    temporal_attention = attention_mechanism(embed_dim=128, num_heads=16).to(device)
-    #temporal_attention = MultiHeadAttention(key_size=128, query_size=128, value_size=128, num_hiddens=128,
-    #             num_heads=16, dropout=0.0, bias=False, valid_len=None).to(device)
-    attn_output = temporal_attention(encoder_ego_agent_outputs, encoder_agents_outputs, encoder_agents_outputs)
-
-    # Spatial encoder
-    spatial_agents_encoder = SpatialEncoderLSTM(n_frames*n_car_states, hidden_size, n_car_states=n_car_states, n_agents=n_agents, n_frame_history=n_frames, batch_size=batch_size, device=device).to(device)
-    spatial_ego_agent_encoder = SpatialEncoderLSTM(n_frames*n_car_states, hidden_size, n_car_states=n_car_states, n_agents=1, n_frame_history=n_frames, batch_size=batch_size, device=device).to(device)
-
-    h_spatial_agents = spatial_agents_encoder.init_hidden(batch_size)
-    h_spatial_ego_agent = spatial_ego_agent_encoder.init_hidden(batch_size)
-
-    Spatial_encoder_agents_outputs, h_Spatial_agents = spatial_agents_encoder(input_data_agents.float(), h_spatial_agents) #to(torch.int64)
-    Spatial_encoder_ego_agent_outputs, h_Spatial_ego_agent = spatial_ego_agent_encoder(input_data_ego_agent.float() , h_spatial_ego_agent) #to(torch.int64)
-
-    # Spatial Attention mechanism
-    Spatial_attention = attention_mechanism(embed_dim=128, num_heads=16).to(device)
-    Spatial_attn_output = Spatial_attention(Spatial_encoder_ego_agent_outputs, Spatial_encoder_agents_outputs, Spatial_encoder_agents_outputs)
-
-    # Map Encoder
-    image_encoder = raster_encoder(cfg).to(device)
-    image_features = image_encoder(input_image)
-    image_features = image_features.unsqueeze(0)
-    image_features = image_features.permute(2, 1, 0)
-
-    # Map Attention mechanism
-    map_attention = attention_mechanism(embed_dim=128, num_heads=16, k_dim=1, v_dim=1).to(device)
-    map_attn_output = map_attention(Spatial_encoder_ego_agent_outputs, image_features, image_features)
-
-    # Concat all three: spatial, temporal and map
-    concat_temporal_tensor = torch.cat((attn_output[0], encoder_ego_agent_outputs), dim=2)
-    concat_spatial_tensor = torch.cat((Spatial_attn_output[0], Spatial_encoder_ego_agent_outputs), dim=2)
-    concat_map_tensor = torch.cat((map_attn_output[0], Spatial_encoder_ego_agent_outputs), dim=2)
-
-    # Temporal concat
-    total_concat_size = concat_temporal_tensor.shape[2] + concat_spatial_tensor.shape[2] + concat_map_tensor.shape[2]
-    final_encoded_tensor = torch.zeros((n_frames, batch_size, total_concat_size))
-    for iframe in range(n_frames):
-        final_encoded_tensor[iframe, :, :] = torch.cat((concat_temporal_tensor[iframe, :, :].unsqueeze(0),
-                                                        concat_spatial_tensor, concat_map_tensor), dim=2)
-
-    # Decoder
-    final_layer = decoder( cfg,  input_size = total_concat_size, hidden_size= 128, n_layers=1, drop_prob=0, n_frame_history=n_frames,
-                          batch_size=batch_size,device='cpu',num_modes=3)
-    h_final = final_layer.init_hidden(batch_size)
-    predictions, probabilities = final_layer(final_encoded_tensor, h_final)
-
-    optimizer = optim.Adam(agents_encoder.parameters(), lr=cfg["model_params"]["lr"])
-    agents_encoder.to(device)
-
-    if PRETRAINED:
-        WEIGHT_FILE = 'MNv2_carstates_4999.pth'
-        checkpoint = torch.load(WEIGHT_FILE, map_location=device)
-        epoch = checkpoint['epoch']
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-    print(model)
-
-    criterion = pytorch_neg_multi_log_likelihood_batch
-
-
-
-
-
-
-
-
-
-
-
-
-    model = train(device, model, train_dataset, train_dataloader, valid_dataloader, optimizer, criterion,
-                  lrate=cfg['model_params']['lr'])
-
     # ===== SAVING MODEL
     print("Saving the model...")
-    torch.save(model.state_dict(), "MNv2_carstates.pth")
+    torch.save(model.state_dict(), "stamina.pth")
     print('model saved')
-
-
-
-    dm = LocalDataManager()
-    dataset_path = dm.require(cfg["sample_data_loader"]["key"])
-    zarr_dataset = ChunkedDataset(dataset_path)
-    zarr_dataset.open()
 
