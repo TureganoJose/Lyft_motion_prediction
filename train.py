@@ -5,6 +5,7 @@ from torch.utils.data import Dataset, DataLoader, Subset, SubsetRandomSampler
 from classes.custom_classes import CustomAgentDataset, CustomEgoDataset
 import numpy as np
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 import os
 
@@ -56,7 +57,7 @@ cfg = {
     'model_params': {
         'model_architecture': 'resnet18',
         'history_num_frames': 10,
-        'lr': 1e-3,
+        'lr': 1e-4,
         'history_step_size': 1,
         'history_delta_time': 0.1,
         'future_num_frames': 50,
@@ -94,7 +95,7 @@ cfg = {
         'key': '/media/jose/OS/Workspaces/L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/validate.zarr',
          "batch_size": 64,
          "shuffle": False,
-         "num_workers": 2
+         "num_workers": 1
     },
     'test_data_loader': {
         'key': '/media/jose/OS/Workspaces/L5_competition/lyft-motion-prediction-autonomous-vehicles/scenes/test.zarr',
@@ -104,13 +105,13 @@ cfg = {
     },
 
     'train_params': {
-        'checkpoint_every_n_steps': 100,
-        'max_num_steps': 500
+        'checkpoint_every_n_steps': 1000,
+        'max_num_steps': 5000
     },
 
     'valid_params': {
-        'checkpoint_every_n_steps': 100,
-        'max_num_steps': 500
+        'checkpoint_every_n_steps': 1000,
+        'max_num_steps': 5000
     },
     'test_params': {
         'image_coords': True
@@ -140,8 +141,7 @@ def train(device, model, train_dataloader, valid_dataloader, opt=None, criterion
     print("Training...")
     progress = tqdm(range(cfg["train_params"]["max_num_steps"]))
     train_iter = iter(train_dataloader)
-    val_iter = []  # iter(valid_dataloader)
-    total_loss =[]
+    total_loss = []
 
     for i in progress:
         try:
@@ -167,7 +167,8 @@ def train(device, model, train_dataloader, valid_dataloader, opt=None, criterion
             val_loss = validation_function('/home/jose/Repos/Lyft_motion_prediction/gt.csv',
                                             model,
                                             valid_dataloader)
-            desc = f"Loss: {round(loss.item(), 4)} Validation Loss: {round(val_loss.item(), 4)}"
+            total_loss += loss.item()
+            desc = f"Loss: {round(loss.item(), 4)} Total Loss: {total_loss/(i+1)}Validation Loss: {round(val_loss.item(), 4)}"
             losses.append(loss.item())
             vals.append(val_loss.item())
         else:
@@ -176,19 +177,19 @@ def train(device, model, train_dataloader, valid_dataloader, opt=None, criterion
 
         # Save checkpoint
         if (i + 1) % cfg['train_params']['checkpoint_every_n_steps'] == 0:
-            torch.save({'i_sample': i + 1,
+            torch.save({'i_sample': i + 1 + 5000,
                         'losses': losses,
                         'vals': vals,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict()},
-                       f'stamina_{i+0}.pth')
+                       f'stamina_{i+1+5000}.pth')
         progress.set_description(desc)
 
-    return model
+    return 1
 
 
 VALIDATION = True  # A hyperparameter you could use to toggle for validating the model
-PRETRAINED = False
+PRETRAINED = True
 
 # %% [code]
 if __name__ == '__main__':
@@ -224,13 +225,17 @@ if __name__ == '__main__':
     i_sample = 1
 
     if PRETRAINED:
-        WEIGHT_FILE = 'stamina_res_56499.pth'
+        WEIGHT_FILE = 'stamina_4999.pth'
         checkpoint = torch.load(WEIGHT_FILE, map_location=device)
-        i_sample = checkpoint['iter']
+        i_iter = checkpoint['i_sample']
         stamina.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         losses = checkpoint['losses']
         vals = checkpoint['vals']
+        #plt.figure(figsize=(8, 4))
+        #plt.plot(range(i_iter), losses, color='blue')
+        #plt.plot(range(1000, i_iter+1000, 1000), vals, color='red')
+        #plt.show()
 
         # ===== LOAD TRAINING DATASET
     dm = LocalDataManager(None)
@@ -240,7 +245,7 @@ if __name__ == '__main__':
 
     index_scenes = []
     if not PRETRAINED:
-        index_scenes = np.arange(round(len(train_dataset)/train_cfg["batch_size"]))  # 531365
+        index_scenes = np.arange(round(len(train_dataset)))  # 531365
         np.random.shuffle(index_scenes)
         with open('index_scenes.pkl', 'wb') as f:  # Python 3: open(..., 'wb')
             pickle.dump(index_scenes, f)
@@ -249,7 +254,7 @@ if __name__ == '__main__':
             index_scenes = pickle.load(f)
 
     train_dataloader = DataLoader(train_dataset, shuffle=train_cfg["shuffle"],
-                                  sampler=IndexSampler(index_scenes[i_sample:]), drop_last=True,
+                                  sampler=IndexSampler(index_scenes[i_iter*train_cfg["batch_size"]:]), drop_last=True,
                                   batch_size=train_cfg["batch_size"], num_workers=train_cfg["num_workers"])
     print("==================================TRAIN DATA==================================")
     print(train_dataset)
@@ -258,27 +263,31 @@ if __name__ == '__main__':
         ## ===== LOAD VALIDATION DATASET
 
         # Creating data indices for training and validation splits:
-        eval_zarr_path ='/home/jose/Repos/Lyft_motion_prediction/validate.zarr'
-        eval_mask_path='/home/jose/Repos/Lyft_motion_prediction/mask.npz'
+        eval_zarr_path = '/home/jose/Repos/Lyft_motion_prediction/validate.zarr'
+        eval_mask_path = '/home/jose/Repos/Lyft_motion_prediction/mask.npz'
         eval_zarr = ChunkedDataset(eval_zarr_path).open()
         eval_mask = np.load(eval_mask_path)["arr_0"]
         # ===== INIT DATASET AND LOAD MASK
-        eval_dataset = AgentDataset(cfg, eval_zarr, rasterizer, agents_mask=eval_mask)
+        val_dm = LocalDataManager(None)
+        val_rasterizer = build_rasterizer(cfg, val_dm)
+        eval_dataset = CustomAgentDataset(cfg, eval_zarr, val_rasterizer, agents_mask=eval_mask)
         dataset_size = len(eval_dataset)
         indices = list(range(dataset_size))
         split = cfg["valid_params"]["max_num_steps"]
         random_seed = 42 + 5
-        shuffle_dataset=False
+        shuffle_dataset = False
         if shuffle_dataset:
             np.random.seed(random_seed)
             np.random.shuffle(indices)
         val_indices = indices[:split]
 
         valid_sampler = SubsetRandomSampler(val_indices)
-        val_dataloader = DataLoader(eval_dataset, sampler=valid_sampler, drop_last=True,
+        val_dataloader = DataLoader(eval_dataset, drop_last=True, sampler=valid_sampler,
                                      batch_size=cfg["valid_data_loader"]["batch_size"],
                                      num_workers=cfg["valid_data_loader"]["num_workers"])
-
+        #val_loss = validation(eval_gt_path='/home/jose/Repos/Lyft_motion_prediction/gt.csv',
+        #                      model=stamina,
+        #                      eval_dataloader=val_dataloader)
         print(val_dataloader)
         print("==================================VALIDATION DATA==================================")
 

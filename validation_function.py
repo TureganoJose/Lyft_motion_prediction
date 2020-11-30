@@ -10,6 +10,7 @@ from torch.utils.data.sampler import SubsetRandomSampler
 from tqdm import tqdm
 from l5kit.evaluation.metrics import neg_multi_log_likelihood, time_displace
 
+
 def convert_agent_coordinates_to_world_offsets(
     agents_coords: np.ndarray,
     world_from_agents: np.ndarray,
@@ -28,8 +29,8 @@ def convert_agent_coordinates_to_world_offsets(
         coords_offset.append(predition_offset)
     return np.stack(coords_offset)
 
-def validation(eval_gt_path, model, eval_dataloader):
 
+def validation(eval_gt_path, model, eval_dataloader):
 
     # store information for evaluation
     future_coords_offsets_pd = []
@@ -38,10 +39,15 @@ def validation(eval_gt_path, model, eval_dataloader):
     agent_ids = []
     target_ls = []
     avails_ids = []
-    progress_bar = tqdm(eval_dataloader)
+    eval_iter = iter(eval_dataloader)
+    progress_bar = tqdm(range(len(eval_dataloader)))
 
-    for data in progress_bar:
-
+    for i in progress_bar:
+        try:
+            data = next(eval_iter)
+        except StopIteration:
+            eval_iter = iter(eval_dataloader)
+            data = next(eval_iter)
         # Forward pass
         preds, confidences = model(data)
         # convert agent coordinates into world offsets
@@ -83,4 +89,4 @@ def validation(eval_gt_path, model, eval_dataloader):
             conf = inference[key]["conf"]
             for metric in metrics:
                 metrics_dict[metric.__name__].append(metric(gt_coord, pred_coords, conf, avail))
-    return metrics_dict
+    return np.mean(metrics_dict["neg_multi_log_likelihood"])
